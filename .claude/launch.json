@@ -1,0 +1,12 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "qwen-image-workbench",
+      "runtimeExecutable": "node",
+      "runtimeArgs": ["server.js"],
+      "port": 3788,
+      "url": "http://127.0.0.1:3788"
+    }
+  ]
+}

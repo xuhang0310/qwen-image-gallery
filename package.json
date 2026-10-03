@@ -1,0 +1,28 @@
+{
+  "name": "qwen-image-gallery",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Local Qwen-Image visual generation workbench",
+  "scripts": {
+    "start": "npm run build && node server.js",
+    "dev": "vite",
+    "build": "vite build",
+    "check": "node --check server.js && node --check lib/storage.js && npm run build",
+    "format": "prettier --write src lib shared server.js vite.config.mjs package.json README.md index.html",
+    "format:check": "prettier --check src lib shared server.js vite.config.mjs package.json README.md index.html"
+  },
+  "dependencies": {
+    "express": "^5.1.0",
+    "multer": "^2.4.0",
+    "sharp": "^0.35.5",
+    "vue": "^3.5.43"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^6.0.9",
+    "prettier": "^3.9.9",
+    "vite": "^8.3.2"
+  },
+  "engines": {
+    "node": ">=24.0.0"
+  }
+}

@@ -1,0 +1,70 @@
+{
+  "port": 3788,
+  "comfyUrl": "http://127.0.0.1:8000",
+  "comfyBase": "D:\\comfyui",
+  "comfyMain": "D:\\Program Files\\comfyui\\resources\\ComfyUI\\main.py",
+  "models": {
+    "unet": "qwen_image_2.1_int8_convrot.safetensors",
+    "clip": "qwen3vl_8b_w4a8.safetensors",
+    "vae": "qwen_image_2.1_vae_bf16.safetensors",
+    "upscale": "4x-UltraSharp.pth"
+  },
+  "sampler": {
+    "steps": 25,
+    "cfg": 1,
+    "negativeCfg": 3,
+    "name": "euler",
+    "scheduler": "simple"
+  },
+  "requestTimeoutMs": 20000,
+  "missingGraceMs": 30000,
+  "ratios": {
+    "1:1": {
+      "label": "方形",
+      "hint": "适合头像、封面与商品图",
+      "1K": [1024, 1024],
+      "2K": [1664, 1664],
+      "4K": [4096, 4096]
+    },
+    "16:9": {
+      "label": "横版",
+      "hint": "适合视频封面与桌面壁纸",
+      "1K": [1024, 576],
+      "2K": [1664, 928],
+      "4K": [3840, 2160]
+    },
+    "9:16": {
+      "label": "竖版",
+      "hint": "适合社交媒体竖图",
+      "1K": [576, 1024],
+      "2K": [928, 1664],
+      "4K": [2160, 3840]
+    },
+    "4:3": {
+      "label": "标准",
+      "hint": "平衡的通用构图",
+      "1K": [1024, 768],
+      "2K": [1472, 1104],
+      "4K": [3840, 2880]
+    },
+    "3:4": {
+      "label": "人像",
+      "hint": "适合人物与海报",
+      "1K": [768, 1024],
+      "2K": [1104, 1472],
+      "4K": [2880, 3840]
+    },
+    "3:2": {
+      "label": "摄影",
+      "hint": "接近相机原生比例",
+      "1K": [1024, 688],
+      "2K": [1584, 1056],
+      "4K": [3840, 2560]
+    }
+  },
+  "qualities": {
+    "1K": { "label": "快速", "hint": "最长边 1024 px" },
+    "2K": { "label": "精细", "hint": "最长边 1472–1664 px" },
+    "4K": { "label": "超分", "hint": "精细生图后超分" }
+  }
+}
