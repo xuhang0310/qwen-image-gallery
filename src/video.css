@@ -1,0 +1,212 @@
+.board-node.is-video {
+  width: 360px;
+  border-color: #465b52;
+}
+.board-node.is-video-generator {
+  border-color: #465b52;
+}
+.video-composer {
+  padding: 0 22px 18px;
+  cursor: default;
+}
+.video-model-line {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 16px;
+  color: var(--subtle);
+  font-size: 10px;
+}
+.video-model-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 9px;
+  border: 1px solid #405a4c;
+  border-radius: 6px;
+  background: #27332d;
+  color: #bad5c4;
+  font-size: 12px;
+}
+.video-composer label {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin: 12px 0 8px;
+  color: var(--muted);
+  font-size: 12px;
+}
+.video-composer label small {
+  color: var(--subtle);
+  font-size: 10px;
+}
+.video-composer textarea {
+  display: block;
+  width: 100%;
+  resize: vertical;
+  min-height: 64px;
+  padding: 10px 12px;
+  border: 1px solid var(--line-strong);
+  border-radius: 9px;
+  background: #14161a;
+  color: var(--text);
+  user-select: text;
+}
+.video-composer .composer-reference {
+  margin-bottom: 16px;
+}
+.video-options-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  align-items: end;
+  gap: 20px;
+  margin: 6px 0 14px;
+}
+.video-options-row .parameter-label {
+  display: block;
+  margin: 12px 0 8px;
+}
+.video-options-row .parameter-options {
+  margin: 0;
+}
+.video-composer select {
+  width: 100%;
+  padding: 9px 10px;
+  border: 1px solid var(--line-strong);
+  border-radius: 7px;
+  color: var(--text);
+  background: #22262d;
+}
+.video-output {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 16px;
+  padding: 12px 10px;
+  border: 1px solid #36463d;
+  border-radius: 8px;
+  background: #202923;
+  color: #b4cabd;
+  font-size: 11px;
+}
+.video-ratio-options .parameter-label {
+  display: block;
+  margin: 12px 0 8px;
+}
+.video-ratio-options .parameter-options {
+  display: flex;
+  gap: 8px;
+  margin: 0;
+}
+.video-ratio-options .parameter-options button {
+  flex: 1;
+}
+.video-output strong {
+  color: #dee9e1;
+  font-size: 12px;
+}
+.video-note {
+  color: var(--subtle);
+  font-size: 11px;
+  line-height: 1.7;
+  margin: 10px 0;
+}
+.video-submit {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+}
+.video-engine-status {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 10px 0;
+  color: var(--danger);
+  font-size: 11px;
+}
+.video-player {
+  position: relative;
+  background: #0b0c0e;
+  aspect-ratio: 16 / 9;
+}
+.video-player video {
+  display: block;
+  width: 100%;
+  height: 100%;
+  cursor: default;
+}
+.video-playback-error {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  align-items: center;
+  justify-content: center;
+  background: #14161a;
+  color: var(--muted);
+  font-size: 12px;
+}
+.video-result-heading {
+  height: 44px;
+  padding: 0 10px 0 14px;
+}
+.video-result-heading .app-icon {
+  color: #aac7b7;
+}
+.video-result-dialogue {
+  margin: 12px 14px;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.7;
+  user-select: text;
+}
+.video-result-footer {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 6px;
+  padding: 10px 12px;
+  border-top: 1px solid var(--line);
+  font-size: 10px;
+  color: var(--subtle);
+}
+.video-result-footer a {
+  text-decoration: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.board-library-tabs {
+  display: flex;
+  gap: 4px;
+}
+.board-library-tabs button {
+  color: var(--subtle);
+  border: 0;
+  background: transparent;
+  padding: 4px 8px;
+  border-radius: 5px;
+}
+.board-library-tabs button.is-selected {
+  background: #31392f;
+  color: #c1d2c5;
+}
+.board-rail-video-icon {
+  width: 46px;
+  height: 56px;
+  display: grid;
+  place-items: center;
+  border: 1px solid #405a4c;
+  border-radius: 5px;
+  color: #b4cabd;
+  background: #232d26;
+}
+.board-add-video {
+  color: #bcd5c6;
+}

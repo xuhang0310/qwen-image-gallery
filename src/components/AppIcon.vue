@@ -1,6 +1,7 @@
 <script setup>
 defineProps({ name: String });
 const paths = {
+  video: "M3 5h13v14H3zM16 10l5-3v10l-5-3M8 9l4 3-4 3z",
   close: "M6 6l12 12M18 6L6 18",
   arrow: "M4 12h16m-6-6 6 6-6 6",
   chevron: "m7 10 5 5 5-5",
@@ -14,6 +15,10 @@ const paths = {
   download: "M12 3v12m-5-5 5 5 5-5M4 17v4h16v-4",
   upload: "M12 16V4m-5 5 5-5 5 5M4 17v4h16v-4",
   plus: "M12 5v14M5 12h14",
+  check: "m5 12 4 4L19 6",
+  settings: "M4 7h16M4 17h16M8 4v6M16 14v6",
+  trash: "M4 7h16M9 3h6l1 4M6 7l1 14h10l1-14M10 11v6M14 11v6",
+  undo: "M4 9h9a7 7 0 0 1 0 14M4 9l5-5M4 9l5 5",
 };
 </script>
 <template>

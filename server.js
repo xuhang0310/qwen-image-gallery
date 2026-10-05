@@ -7,6 +7,16 @@ const sharp = require("sharp");
 const { Readable } = require("node:stream");
 const { pipeline } = require("node:stream/promises");
 const { createStorage } = require("./lib/storage");
+const { createSetup, loadRuntime } = require("./lib/setup");
+const { configureNetwork } = require("./lib/network");
+const { createApiImages } = require("./lib/api-images");
+const { createVideos } = require("./lib/videos");
+const {
+  videoQualities,
+  videoRatios,
+  safeVideoUrl,
+} = require("./shared/video.mjs");
+const { imageProfile } = require("./shared/image-models.mjs");
 const defaults = require("./shared/config.json");
 const overrides = process.env.WORKBENCH_CONFIG
   ? JSON.parse(fs.readFileSync(process.env.WORKBENCH_CONFIG, "utf8"))
@@ -25,15 +35,18 @@ const upload = multer({
 
 const app = express();
 const PORT = Number(process.env.PORT || config.port);
-const COMFYUI_BASE_URL = (
-  process.env.COMFYUI_BASE_URL || config.comfyUrl
-).replace(/\/$/, "");
 const WORKFLOW = JSON.parse(
   fs.readFileSync(path.join(__dirname, "workflows", "qwen-image.json"), "utf8"),
 );
 const DATA_DIR = path.resolve(
   process.env.DATA_DIR || path.join(__dirname, ".data"),
 );
+const runtime = loadRuntime(DATA_DIR, {
+  ...config,
+  comfyUrl: process.env.COMFYUI_BASE_URL || config.comfyUrl,
+});
+let COMFYUI_BASE_URL = runtime.comfyUrl.replace(/\/$/, "");
+configureNetwork(runtime.proxyUrl);
 const storage = createStorage(DATA_DIR);
 const thumbnailDir = path.join(DATA_DIR, "thumbnails");
 fs.mkdirSync(thumbnailDir, { recursive: true });
@@ -46,6 +59,18 @@ const PRESETS = config.ratios;
 
 app.disable("x-powered-by");
 app.use(express.json({ limit: "16mb" }));
+app.use("/api", (req, res, next) => {
+  if (!["127.0.0.1", "localhost", "[::1]"].includes(req.hostname))
+    return res.status(403).json({ error: "仅允许通过本机地址访问工作台" });
+  if (["GET", "HEAD", "OPTIONS"].includes(req.method)) return next();
+  const origin = req.get("origin");
+  if (
+    req.get("sec-fetch-site") === "cross-site" ||
+    (origin && origin !== `http://${req.get("host")}`)
+  )
+    return res.status(403).json({ error: "仅允许从本机工作台操作" });
+  next();
+});
 app.use(
   express.static(path.join(__dirname, "dist"), { maxAge: "1h", index: false }),
 );
@@ -85,6 +110,27 @@ function validSourceImage(image) {
     /^[a-zA-Z0-9_-]+(?: \(\d+\))?\.(png|jpg|webp)$/.test(image.name)
   );
 }
+
+const apiImages = createApiImages({
+  app,
+  dataDir: DATA_DIR,
+  storage,
+  readComfySource: async (source, signal) => {
+    if (!validSourceImage(source)) throw new Error("参考图无效，请重新上传");
+    return withComfy(
+      "/view?" + imageQuery({ filename: source.name, ...source }),
+      { signal },
+      async (response) => {
+        if (!response.ok)
+          throw new Error("参考图无法读取，请重新上传或启动本地引擎");
+        const buffer = Buffer.from(await response.arrayBuffer());
+        if (buffer.length > 50 * 1024 * 1024)
+          throw new Error("参考图过大，请缩小后重新上传");
+        return buffer;
+      },
+    );
+  },
+});
 
 function createWorkflow({
   prompt,
@@ -172,6 +218,10 @@ function createWorkflow({
     workflow["12"].inputs.width = dimensions.finalWidth;
     workflow["12"].inputs.height = dimensions.finalHeight;
     workflow["9"].inputs.images = ["12", 0];
+  } else {
+    delete workflow["10"];
+    delete workflow["11"];
+    delete workflow["12"];
   }
 
   return { workflow, dimensions, seed: workflow["6"].inputs.seed };
@@ -203,13 +253,16 @@ async function withComfy(endpoint, options, consume) {
   const controller = new AbortController();
   const { timeout = REQUEST_TIMEOUT, ...fetchOptions } = options || {};
   const timer = setTimeout(() => controller.abort(), timeout);
+  const signal = fetchOptions.signal
+    ? AbortSignal.any([controller.signal, fetchOptions.signal])
+    : controller.signal;
   try {
     const response = await fetch(COMFYUI_BASE_URL + endpoint, {
       ...fetchOptions,
-      signal: controller.signal,
+      signal,
       headers: { Accept: "application/json", ...fetchOptions.headers },
     });
-    return await consume(response, controller.signal);
+    return await consume(response, signal);
   } finally {
     clearTimeout(timer);
   }
@@ -284,7 +337,147 @@ function imageQuery(image) {
   return params.toString();
 }
 
+const setupService = createSetup({
+  app,
+  config,
+  dataDir: DATA_DIR,
+  runtime,
+  applyRuntime: (value) => {
+    COMFYUI_BASE_URL = value.comfyUrl;
+    configureNetwork(value.proxyUrl);
+  },
+  comfyJson,
+  busy: () => false,
+  verify: async (signal, log) => {
+    const prompt =
+      "一只红色陶瓷马克杯放在浅灰色桌面上，背景干净，柔和自然光，产品摄影，不要文字";
+    const parameters = {
+      prompt,
+      negativePrompt: "",
+      ratio: "1:1",
+      quality: "1K",
+      mode: "txt2img",
+    };
+    const { workflow, dimensions, seed } = createWorkflow(parameters);
+    const startedAt = Date.now();
+    const submitted = await comfyJson("/prompt", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        prompt: workflow,
+        client_id: "qwen-workbench-setup",
+      }),
+    });
+    const id = submitted.prompt_id;
+    if (!id) throw new Error(errorText(submitted));
+    const metadata = {
+      id,
+      promptId: id,
+      ...parameters,
+      seed,
+      dimensions,
+      createdAt: startedAt,
+      purpose: "setup-verification",
+    };
+    storage.put(id, { ...metadata, status: "queued" });
+    log("已提交验证任务，正在加载模型与生成图片…");
+    let finished = false;
+    try {
+      for (let attempt = 0; attempt < 600; attempt++) {
+        signal.throwIfAborted();
+        const history = await comfyJson("/history/" + encodeURIComponent(id));
+        if (history[id]) {
+          const result = normalizeHistory(id, history[id]);
+          if (["failed", "cancelled"].includes(result.status))
+            throw new Error(result.error);
+          if (result.status === "completed") {
+            finished = true;
+            const image = result.images[0];
+            const query = imageQuery(image);
+            const imageUrls = result.images.map((value) => ({
+              ...value,
+              url: "/api/images/view?" + imageQuery(value),
+              thumbnailUrl:
+                "/api/images/view?" + imageQuery(value) + "&thumbnail=1",
+              downloadUrl: "/api/images/download?" + imageQuery(value),
+            }));
+            storage.put(id, { ...metadata, ...result, imageUrls });
+            const info = await withComfy(
+              "/view?" + query,
+              {},
+              async (response) => {
+                if (!response.ok) throw new Error("生成图片无法读取");
+                const chunks = [];
+                let bytes = 0;
+                for await (const chunk of response.body) {
+                  signal.throwIfAborted();
+                  bytes += chunk.length;
+                  if (bytes > 20 * 1024 * 1024)
+                    throw new Error("验证图片文件异常过大");
+                  chunks.push(chunk);
+                }
+                const buffer = Buffer.concat(chunks);
+                const decoder = sharp(buffer, {
+                  limitInputPixels: 4 * 1024 * 1024,
+                  failOn: "warning",
+                });
+                const metadata = await decoder.metadata();
+                await decoder.raw().toBuffer();
+                if (metadata.width !== 1024 || metadata.height !== 1024)
+                  throw new Error("生成图片的尺寸与验证参数不一致");
+                return metadata;
+              },
+            );
+            return {
+              promptId: id,
+              imageUrl: "/api/images/view?" + query,
+              prompt,
+              width: info.width,
+              height: info.height,
+              elapsedMs: Date.now() - startedAt,
+            };
+          }
+        }
+        await new Promise((resolve, reject) => {
+          const abort = () => {
+            clearTimeout(timer);
+            reject(signal.reason);
+          };
+          const timer = setTimeout(() => {
+            signal.removeEventListener("abort", abort);
+            resolve();
+          }, 2000);
+          signal.addEventListener("abort", abort, { once: true });
+          if (signal.aborted) abort();
+        });
+      }
+      throw new Error(
+        "试生成超过 20 分钟，已请求取消本次验证任务。请检查显存、驱动与引擎日志。",
+      );
+    } catch (error) {
+      storage.put(id, {
+        ...metadata,
+        status: signal.aborted ? "cancelled" : "failed",
+        error: error.message || "验证已取消",
+      });
+      throw error;
+    } finally {
+      if (!finished) {
+        const body = (value) => ({
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(value),
+        });
+        await comfyJson("/queue", body({ delete: [id] })).catch(() => {});
+        await comfyJson("/interrupt", body({ prompt_id: id })).catch(() => {});
+      }
+    }
+  },
+});
+
 app.get("/api/health", async (_req, res) => {
+  if (_req.query.provider === "api")
+    return res.json({ ...(await apiImages.connection()), provider: "api" });
   try {
     const [stats, queue] = await Promise.all([
       comfyJson("/system_stats"),
@@ -347,39 +540,25 @@ app.post("/api/upload", (req, res) => {
         .json({ error: "图片损坏或超过 2400 万像素，请换一张图片" });
     }
     try {
-      const form = new FormData();
-      form.append(
-        "image",
-        new Blob([buffer], { type: "image/png" }),
-        `${crypto.randomUUID()}.png`,
-      );
-      form.append("subfolder", "qwen-workbench");
-      form.append("type", "input");
-      form.append("overwrite", "false");
-      const source = await comfyJson("/upload/image", {
-        method: "POST",
-        body: form,
-      });
-      if (!validSourceImage(source))
-        throw new Error("ComfyUI 返回了无效的图片信息");
-      const sourceImage = {
-        name: source.name,
-        subfolder: source.subfolder,
-        type: source.type,
-        width: metadata.width,
-        height: metadata.height,
-      };
+      const sourceImage = await apiImages.saveInput(buffer, metadata);
       res.status(201).json({
         sourceImage,
-        previewUrl: `/api/images/view?${imageQuery({ filename: source.name, ...source })}`,
+        previewUrl: `/api/images/view?${imageQuery({ filename: sourceImage.name, ...sourceImage })}&provider=api`,
       });
     } catch (error) {
-      res.status(502).json({ error: `上传到 ComfyUI 失败：${error.message}` });
+      res.status(500).json({ error: `保存参考图失败：${error.message}` });
     }
   });
 });
 
 app.post("/api/generate", async (req, res) => {
+  const provider = req.body?.provider ?? apiImages.publicSettings().provider;
+  if (!["local", "api"].includes(provider))
+    return res.status(400).json({ error: "生成引擎无效" });
+  if (provider === "local" && setupService.isBusy())
+    return res
+      .status(409)
+      .json({ error: "环境配置操作正在执行，请等待完成后再生成" });
   if (
     !req.body ||
     typeof req.body !== "object" ||
@@ -410,13 +589,57 @@ app.post("/api/generate", async (req, res) => {
   if (!prompt) return res.status(400).json({ error: "请先写下正向提示词" });
   if (!["txt2img", "img2img"].includes(mode))
     return res.status(400).json({ error: "生成模式无效" });
-  if (!Object.hasOwn(PRESETS, ratio) || !["1K", "2K", "4K"].includes(quality))
+  if (
+    provider === "local" &&
+    (!Object.hasOwn(PRESETS, ratio) || !["1K", "2K", "4K"].includes(quality))
+  )
     return res.status(400).json({ error: "不支持的比例或清晰度" });
-  if (mode === "img2img" && !validSourceImage(sourceImage)) {
+  if (
+    mode === "img2img" &&
+    !validSourceImage(sourceImage) &&
+    !apiImages.validSource(sourceImage)
+  ) {
     return res.status(400).json({ error: "请先上传原图" });
   }
 
+  if (provider === "api") {
+    try {
+      return res.status(202).json(
+        apiImages.submit({
+          prompt,
+          negativePrompt,
+          ratio,
+          quality,
+          mode,
+          sourceImage,
+          model: req.body.model,
+        }),
+      );
+    } catch (error) {
+      return res.status(400).json({ error: error.message });
+    }
+  }
+
   try {
+    let comfySource = sourceImage;
+    if (mode === "img2img" && apiImages.validSource(sourceImage)) {
+      const buffer = await apiImages.sourceBuffer(sourceImage);
+      const form = new FormData();
+      form.append(
+        "image",
+        new Blob([buffer], { type: "image/png" }),
+        sourceImage.name,
+      );
+      form.append("subfolder", "qwen-workbench");
+      form.append("type", "input");
+      form.append("overwrite", "false");
+      comfySource = await comfyJson("/upload/image", {
+        method: "POST",
+        body: form,
+      });
+      if (!validSourceImage(comfySource))
+        throw new Error("ComfyUI 返回了无效的参考图信息");
+    }
     const seed =
       Number.isSafeInteger(requestedSeed) && requestedSeed >= 0
         ? requestedSeed
@@ -432,7 +655,7 @@ app.post("/api/generate", async (req, res) => {
       quality,
       seed,
       mode,
-      sourceImage,
+      sourceImage: comfySource,
     });
     const body = await comfyJson("/prompt", {
       method: "POST",
@@ -447,6 +670,8 @@ app.post("/api/generate", async (req, res) => {
       throw new Error(`工作流节点错误：${JSON.stringify(body.node_errors)}`);
     }
     const metadata = {
+      provider: "local",
+      model: config.models.unet,
       prompt,
       negativePrompt,
       ratio,
@@ -478,13 +703,19 @@ app.get("/api/config", (_req, res) =>
     qualities: config.qualities,
     sampler: config.sampler,
     models: config.models,
+    engine: apiImages.publicSettings(),
   }),
 );
-app.get("/api/jobs", (_req, res) => res.json({ jobs: storage.list() }));
+app.get("/api/jobs", (_req, res) =>
+  res.json({ jobs: storage.list().filter((job) => job.mediaType !== "video") }),
+);
 
 app.get("/api/jobs/:promptId", async (req, res) => {
   const promptId = cleanText(req.params.promptId, 100);
   const metadata = storage.get(promptId);
+  if (metadata?.mediaType === "video")
+    return res.status(400).json({ error: "请使用视频任务接口" });
+  if (metadata?.provider === "api") return res.json({ promptId, ...metadata });
   if (metadata?.status === "cancelled")
     return res.json({ promptId, ...metadata, images: [] });
   try {
@@ -544,8 +775,11 @@ app.post("/api/jobs/:promptId/cancel", async (req, res) => {
   const id = cleanText(req.params.promptId, 100);
   const job = storage.get(id);
   if (!job) return res.status(404).json({ error: "任务不存在" });
+  if (job.mediaType === "video")
+    return res.status(400).json({ error: "请使用视频任务接口" });
   if (["completed", "failed", "cancelled"].includes(job.status))
     return res.status(409).json({ error: "任务已经结束" });
+  if (job.provider === "api") return res.json(apiImages.cancel(job));
   try {
     // Targeted interruption never stops a task belonging to another application.
     await comfyJson("/queue", {
@@ -575,6 +809,7 @@ app.put("/api/project", (req, res) => {
         error: "项目已在另一个窗口更新，请导出当前项目后重新载入",
         code: "REVISION_CONFLICT",
       });
+    videos.restoreJobs(project.videoJobs);
     res.json({ revision });
   } catch (error) {
     res.status(400).json({ error: error.message });
@@ -617,7 +852,25 @@ function validateProject(value) {
       !["done", "loading", "failed", "empty", "text"].includes(node.status)
     )
       throw new Error("节点格式不正确");
-    if (node.url && !safeImageUrl(node.url)) throw new Error("图片地址不正确");
+    if (
+      node.url &&
+      !(node.kind === "video" ? safeVideoUrl(node.url) : safeImageUrl(node.url))
+    )
+      throw new Error("媒体地址不正确");
+    if (
+      node.kind === "video" &&
+      node.downloadUrl &&
+      !safeVideoUrl(node.downloadUrl)
+    )
+      throw new Error("视频下载地址不正确");
+    if (
+      node.kind === "video-generator" &&
+      (!Object.hasOwn(videoQualities, node.quality) ||
+        !Object.hasOwn(videoRatios, node.ratio) ||
+        typeof node.dialogue !== "string" ||
+        node.dialogue.length > 200)
+    )
+      throw new Error("视频节点参数不正确");
     if (
       node.prompt != null &&
       (typeof node.prompt !== "string" || node.prompt.length > 4000)
@@ -638,12 +891,17 @@ function validateProject(value) {
   )
     throw new Error("连线格式不正确");
   for (const job of value.jobs) {
+    const jobConfig =
+      job.provider === "api"
+        ? imageProfile(job.model || "gpt-image-2")
+        : config;
     if (
       typeof job.id !== "string" ||
       typeof job.prompt !== "string" ||
       !Number.isFinite(job.createdAt) ||
-      !Object.hasOwn(PRESETS, job.ratio) ||
-      !Object.hasOwn(config.qualities, job.quality) ||
+      !jobConfig ||
+      !Object.hasOwn(jobConfig.ratios, job.ratio) ||
+      !Object.hasOwn(jobConfig.qualities, job.quality) ||
       !["queued", "running", "completed", "failed", "cancelled"].includes(
         job.status,
       )
@@ -658,6 +916,20 @@ function validateProject(value) {
   }
   return {
     jobs: value.jobs,
+    videoJobs: Array.isArray(value.videoJobs)
+      ? value.videoJobs
+          .filter(
+            (job) =>
+              job?.mediaType === "video" &&
+              typeof job.id === "string" &&
+              Object.hasOwn(videoQualities, job.quality) &&
+              (job.ratio === undefined ||
+                Object.hasOwn(videoRatios, job.ratio)) &&
+              (!job.videoUrl || safeVideoUrl(job.videoUrl)) &&
+              (!job.downloadUrl || safeVideoUrl(job.downloadUrl)),
+          )
+          .slice(0, 10000)
+      : [],
     board,
     hiddenJobIds: Array.isArray(value.hiddenJobIds)
       ? value.hiddenJobIds.filter((id) => typeof id === "string")
@@ -673,6 +945,10 @@ function safeImageUrl(url) {
 }
 
 async function proxyImage(req, res, download) {
+  if (req.query.provider === "api")
+    return apiImages.serveImage(req, res, download);
+  if (req.query.provider && req.query.provider !== "local")
+    return res.status(400).json({ error: "图片引擎无效" });
   const filename = cleanText(req.query.filename, 255);
   const subfolder = cleanText(req.query.subfolder, 255);
   const type = cleanText(req.query.type || "output", 20);
@@ -752,6 +1028,17 @@ async function proxyImage(req, res, download) {
 app.get("/api/images/view", (req, res) => proxyImage(req, res, false));
 app.get("/api/images/download", (req, res) => proxyImage(req, res, true));
 
+const videos = createVideos({
+  app,
+  storage,
+  comfyJson,
+  withComfy,
+  apiImages,
+  validSourceImage,
+  isBusy: () => setupService.isBusy(),
+  getComfyUrl: () => COMFYUI_BASE_URL,
+});
+
 app.use((req, res, next) => {
   if (req.method !== "GET" || req.path.startsWith("/api/")) return next();
   res.sendFile(path.join(__dirname, "dist", "index.html"));
@@ -767,7 +1054,10 @@ app.use((error, _req, res, _next) => {
           : "请求处理失败",
   });
 });
-app.closeStorage = () => storage.close();
+app.closeStorage = () => {
+  videos.close();
+  storage.close();
+};
 
 if (require.main === module) {
   app.listen(PORT, "127.0.0.1", () => {

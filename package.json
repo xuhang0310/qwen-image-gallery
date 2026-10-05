@@ -7,7 +7,8 @@
     "start": "npm run build && node server.js",
     "dev": "vite",
     "build": "vite build",
-    "check": "node --check server.js && node --check lib/storage.js && npm run build",
+    "check": "node --check server.js && node --check lib/storage.js && node --check lib/setup.js && node --check lib/network.js && node --check lib/api-images.js && node --check lib/videos.js && node --check lib/video-scene.js && node --check shared/image-models.mjs && node --check shared/video.mjs && npm run build",
+    "test:video": "node --test tests/videos.test.cjs",
     "format": "prettier --write src lib shared server.js vite.config.mjs package.json README.md index.html",
     "format:check": "prettier --check src lib shared server.js vite.config.mjs package.json README.md index.html"
   },
@@ -23,6 +24,6 @@
     "vite": "^8.3.2"
   },
   "engines": {
-    "node": ">=24.0.0"
+    "node": ">=24.14.0"
   }
 }

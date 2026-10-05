@@ -1,7 +1,14 @@
 <script setup>
 import { ref, watch, nextTick, useId, onMounted, onBeforeUnmount } from "vue";
 import AppIcon from "./AppIcon.vue";
-defineProps({ model: Object, config: Object });
+import { fitImageParameters } from "../../shared/image-models.mjs";
+const props = defineProps({ model: Object, config: Object });
+watch(
+  () => [props.config, props.model],
+  () =>
+    Object.assign(props.model, fitImageParameters(props.model, props.config)),
+  { immediate: true, flush: "sync" },
+);
 const open = ref(false),
   root = ref(),
   trigger = ref(),
@@ -156,7 +163,7 @@ defineExpose({ close });
           aria-label="画面比例"
         >
           <button
-            v-for="ratio in ['1:1', '16:9', '9:16', '4:3', '3:4', '3:2']"
+            v-for="ratio in Object.keys(config.ratios)"
             :key="ratio"
             type="button"
             role="radio"

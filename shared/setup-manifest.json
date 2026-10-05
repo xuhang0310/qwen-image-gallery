@@ -1,0 +1,58 @@
+{
+  "checkedAt": "2026-10-03",
+  "comfy": {
+    "version": "0.38.0",
+    "url": "https://github.com/Comfy-Org/ComfyUI/releases/download/v0.38.0/ComfyUI_windows_portable_nvidia.7z",
+    "bytes": 1994326521,
+    "sha256": "8f137eac345707fd7e42bcf8e29377415243011ca15522a86aed6c77331fbd56"
+  },
+  "extractor": {
+    "url": "https://github.com/ip7z/7zip/releases/download/26.03/7zr.exe",
+    "bytes": 602624,
+    "sha256": "ad4c82fadcbdf93c03b4fc440f300509c7d60c5c2f4d183e35d9d70d6957037d"
+  },
+  "models": [
+    {
+      "id": "unet",
+      "label": "图像主模型",
+      "file": "diffusion_models/qwen_image_2.1_int8_convrot.safetensors",
+      "repo": "Comfy-Org/Qwen-Image-2.1",
+      "revision": "cb504a4090723e43f17ad01cec0359490e2de613",
+      "bytes": 7256783064,
+      "sha256": "cb74113cb03faecd79611b01fd7fd642f0aa60d6f0b95086abee214d75eaa57d",
+      "license": "qwen-research"
+    },
+    {
+      "id": "clip",
+      "label": "文本与参考图编码器",
+      "file": "text_encoders/qwen3vl_8b_w4a8.safetensors",
+      "repo": "Comfy-Org/Qwen-Image-2.1",
+      "revision": "cb504a4090723e43f17ad01cec0359490e2de613",
+      "bytes": 6312105364,
+      "sha256": "7754425e55e7bea2bfde4dde59a4cc236cb44e5ee9c215ea66ef8d47012824eb",
+      "license": "qwen-research"
+    },
+    {
+      "id": "vae",
+      "label": "图片解码器 · VAE",
+      "file": "vae/qwen_image_2.1_vae_bf16.safetensors",
+      "repo": "Comfy-Org/Qwen-Image-2.1",
+      "revision": "cb504a4090723e43f17ad01cec0359490e2de613",
+      "bytes": 675509688,
+      "sha256": "bb21f7473051e1ac368515dd3f2e15cd44d7a11748ee8823e1ddca3e4876b7c9",
+      "license": "qwen-research"
+    },
+    {
+      "id": "upscale",
+      "label": "4 倍超分模型",
+      "file": "upscale_models/4x-UltraSharp.pth",
+      "sourceFile": "4x-UltraSharp.pth",
+      "repo": "Kim2091/UltraSharp",
+      "revision": "920fe218c211f831b43cb30327f203e2b59f5dab",
+      "bytes": 66961958,
+      "sha256": "a5812231fc936b42af08a5edba784195495d303d5b3248c24489ef0c4021fe01",
+      "license": "CC-BY-NC-SA-4.0",
+      "optional": true
+    }
+  ]
+}

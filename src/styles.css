@@ -66,6 +66,10 @@ summary:focus-visible {
   outline: 2px solid var(--blue);
   outline-offset: 3px;
 }
+select:focus-visible {
+  outline: 2px solid var(--blue);
+  outline-offset: 3px;
+}
 textarea::placeholder,
 input::placeholder {
   color: var(--subtle);
@@ -315,6 +319,44 @@ button svg {
 }
 .image-controls {
   margin-bottom: 22px;
+}
+.control-panel {
+  position: relative;
+}
+.form-file-drop,
+.board-file-drop {
+  position: absolute;
+  inset: 14px;
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  gap: 12px;
+  border: 2px dashed #9ac7b0;
+  border-radius: 12px;
+  background: #192620ed;
+  color: #deeee5;
+  text-align: center;
+  pointer-events: none;
+}
+.form-file-drop .app-icon,
+.board-file-drop .app-icon {
+  width: 32px;
+  height: 32px;
+}
+.form-file-drop strong,
+.board-file-drop strong {
+  font-size: 16px;
+  font-weight: 500;
+}
+.form-file-drop span,
+.board-file-drop span {
+  font-size: 12px;
+  color: #a8c3b5;
+}
+.is-file-dragging {
+  box-shadow: inset 0 0 0 1px #9ac7b0;
 }
 .image-controls input[type="file"] {
   max-width: 100%;
@@ -1297,6 +1339,27 @@ button svg {
   cursor: default;
   user-select: text;
 }
+.board-clear {
+  white-space: nowrap;
+  margin-right: 8px;
+}
+.board-clear .app-icon {
+  width: 14px;
+  height: 14px;
+}
+.board-default-model {
+  color: var(--subtle);
+  font-size: 11px;
+  white-space: nowrap;
+}
+.composer-configure {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--muted);
+  text-decoration: underline;
+  cursor: pointer;
+}
 .composer-reference {
   display: flex;
   align-items: center;
@@ -1387,10 +1450,17 @@ button svg {
 }
 .composer-toolbar {
   display: flex;
-  align-items: center;
+  align-items: flex-end;
   justify-content: space-between;
   gap: 16px;
   margin-top: 18px;
+}
+.composer-options {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  flex: 1;
+  min-width: 0;
 }
 .composer-submit {
   min-height: 42px;

@@ -1,8 +1,8 @@
 {
   "port": 3788,
   "comfyUrl": "http://127.0.0.1:8000",
-  "comfyBase": "D:\\comfyui",
-  "comfyMain": "D:\\Program Files\\comfyui\\resources\\ComfyUI\\main.py",
+  "comfyBase": "",
+  "comfyMain": "",
   "models": {
     "unet": "qwen_image_2.1_int8_convrot.safetensors",
     "clip": "qwen3vl_8b_w4a8.safetensors",

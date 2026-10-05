@@ -1,4 +1,7 @@
 <script setup>
+import EngineSwitch from "./EngineSwitch.vue";
+import { useFileDrop, hasFiles } from "../composables/useFileDrop";
+import { imageFileError } from "../image-upload";
 import {
   ref,
   reactive,
@@ -12,6 +15,7 @@ import BoardNode from "./BoardNode.vue";
 import SafeImage from "./SafeImage.vue";
 import GenerationComposer from "./GenerationComposer.vue";
 import AppIcon from "./AppIcon.vue";
+import { videoDimensions } from "../../shared/video.mjs";
 import {
   pending,
   summarize,
@@ -19,8 +23,10 @@ import {
   availablePosition,
   nodeWidth,
   nodeHeight,
+  jobRatio,
 } from "../domain";
 const props = defineProps({ store: Object });
+defineEmits(["configure-engine"]);
 const { s } = props.store;
 const submittingParents = reactive(new Set());
 const viewport = ref(),
@@ -34,6 +40,8 @@ const selected = ref(null),
   menu = ref(null),
   temporaryPath = ref("");
 const sizes = reactive(new Map());
+const fileDrop = useFileDrop(dropFiles);
+const draggingFiles = fileDrop.active;
 const board = computed(() => s.board);
 const nodeMap = computed(
   () => new Map(board.value.nodes.map((n) => [n.id, n])),
@@ -42,7 +50,8 @@ const references = computed(() => {
   const map = new Map();
   for (const edge of board.value.edges) {
     const source = nodeMap.value.get(edge.from);
-    if (source?.url) map.set(edge.to, [...(map.get(edge.to) || []), source]);
+    if (source?.url && source.kind !== "video")
+      map.set(edge.to, [...(map.get(edge.to) || []), source]);
   }
   return map;
 });
@@ -53,12 +62,13 @@ const form = reactive({
   source: null,
 });
 const libraryCount = ref(30);
+const libraryType = ref("image");
 const library = computed(() =>
-  s.jobs
+  (libraryType.value === "video" ? s.videoJobs : s.jobs)
     .filter(
       (j) =>
-        j.status === "completed" &&
-        j.imageUrl &&
+        (libraryType.value === "video" ||
+          (j.status === "completed" && j.imageUrl)) &&
         !s.hiddenJobIds.includes(j.id),
     )
     .slice(0, libraryCount.value),
@@ -139,18 +149,44 @@ function remove(id) {
   if (selected.value === id) selected.value = null;
   if (form.source?.id === id) edit.value = null;
 }
+function clearCanvas() {
+  props.store.clearBoard();
+  selected.value = null;
+  selectedEdge.value = null;
+  edit.value = false;
+  menu.value = null;
+  drag = null;
+  temporaryPath.value = "";
+  sizes.clear();
+  form.source = null;
+  s.preview = null;
+}
 function add(status, position, prompt = "") {
+  const video = status === "video";
+  if (video) status = "text";
   const node = {
     id: crypto.randomUUID(),
     status,
     jobId: null,
     x: Math.round(position.x - (status === "text" ? 240 : 110)),
-    y: Math.round(position.y - 105),
+    y: Math.round(position.y - (video ? 330 : 105)),
     prompt,
     ratio: status === "text" ? "9:16" : null,
     quality: status === "text" ? "2K" : null,
     url: null,
   };
+  if (video)
+    Object.assign(node, {
+      kind: "video-generator",
+      ratio: "16:9",
+      quality: "480P",
+      seconds: 6,
+      dialogue: "",
+      framing: "contain",
+      provider: "local",
+      model: "MiniMax H3",
+    });
+  else if (status === "text") props.store.setNodeEngine(node, s.engine);
   board.value.nodes.push(node);
   select(node.id);
   return board.value.nodes.at(-1);
@@ -158,16 +194,17 @@ function add(status, position, prompt = "") {
 function addMenuNode(status) {
   const node = add(status, menu.value.pos);
   menu.value = null;
-  if (status === "text")
+  if (status === "text" || status === "video")
     nextTick(() =>
       world.value.querySelector(`[data-node-text="${node.id}"]`)?.focus(),
     );
 }
-function addLoading(prompt, ratio, quality, source) {
+function addLoading(prompt, ratio, quality, source, engine) {
   const pos = source
     ? { x: source.x + nodeWidth(source) + 230, y: source.y + 105 }
     : center();
-  const [width, height] = s.config.ratios[ratio][quality];
+  const [width, height] =
+    props.store.generationConfigFor(engine).ratios[ratio][quality];
   const free = availablePosition(
     board.value.nodes,
     { x: pos.x - 110, y: pos.y - 105 },
@@ -175,7 +212,7 @@ function addLoading(prompt, ratio, quality, source) {
   );
   const node = add("loading", { x: free.x + 110, y: free.y + 105 }, prompt);
   [node.width, node.height] = [width, height];
-  Object.assign(node, { ratio, quality });
+  Object.assign(node, { ratio, quality }, engine);
   if (source)
     board.value.edges.push({
       id: crypto.randomUUID(),
@@ -231,6 +268,8 @@ function down(event) {
       ".board-history-rail,.board-node-actions,.generation-composer,.node-heading button,.board-node-pick",
     )
   )
+    return;
+  if (event.target.closest("video,.video-result-footer,.video-playback-error"))
     return;
   const port = event.target.closest(".board-port"),
     node = event.target.closest(".board-node");
@@ -299,7 +338,11 @@ function up(event) {
       !board.value.edges.some(
         (e) => e.from === d.nodeId && e.to === target.dataset.nodeId,
       )
-    )
+    ) {
+      if (nodeMap.value.get(d.nodeId)?.kind === "video") {
+        props.store.toast("视频结果不能作为图片参考，请连接图片节点");
+        return;
+      }
       board.value.edges.push({
         id: crypto.randomUUID(),
         from: d.nodeId,
@@ -312,6 +355,7 @@ function up(event) {
             ? "left"
             : "right",
       });
+    }
   }
 }
 function wheel(event) {
@@ -324,7 +368,7 @@ function context(event) {
   event.preventDefault();
   menu.value = {
     x: Math.min(event.clientX, innerWidth - 190),
-    y: Math.min(event.clientY, innerHeight - 170),
+    y: Math.min(event.clientY, innerHeight - 210),
     pos: worldPoint(event.clientX, event.clientY),
   };
 }
@@ -342,7 +386,11 @@ async function uploaded(event) {
   const file = event.target.files[0],
     target = fileTarget;
   fileTarget = null;
+  event.target.value = "";
   if (!file || !target) return;
+  await uploadFile(file, target);
+}
+async function uploadFile(file, target) {
   const node = target.nodeId
     ? nodeMap.value.get(target.nodeId)
     : add("loading", target.pos);
@@ -361,12 +409,12 @@ async function uploaded(event) {
       height: source.height,
     });
   } catch (error) {
-    if (nodeMap.value.has(node.id))
-      Object.assign(node, {
-        status: "empty",
-        uploading: false,
-        error: error.message,
-      });
+    if (!nodeMap.value.has(node.id)) return;
+    Object.assign(node, {
+      status: "empty",
+      uploading: false,
+      error: error.message,
+    });
     props.store.toast(error.message);
   }
 }
@@ -396,8 +444,14 @@ async function prepareSource(node) {
     new File([blob], "reference.png", { type: blob.type }),
   );
 }
-async function run(prompt, ratio, quality, parent, reference) {
-  if (!s.ready || submittingParents.has(parent?.id)) {
+function apiUnavailable(selection) {
+  return (
+    props.store.engineSelection(selection).provider === "api" &&
+    !s.engine.keyConfigured
+  );
+}
+async function run(prompt, ratio, quality, parent, reference, selection) {
+  if (!s.ready || s.switching || submittingParents.has(parent?.id)) {
     props.store.toast("这个节点正在提交，请稍候");
     return;
   }
@@ -405,7 +459,12 @@ async function run(prompt, ratio, quality, parent, reference) {
     props.store.toast("先写一句提示词吧");
     return;
   }
-  const node = addLoading(prompt.trim(), ratio, quality, parent);
+  const engine = props.store.engineParameters(selection);
+  if (apiUnavailable(engine)) {
+    props.store.toast("请先在 API 配置中填写密钥");
+    return;
+  }
+  const node = addLoading(prompt.trim(), ratio, quality, parent, engine);
   submittingParents.add(parent?.id);
   s.preparing++;
   node.preparing = true;
@@ -414,6 +473,7 @@ async function run(prompt, ratio, quality, parent, reference) {
     node.preparing = false;
     await props.store.generate(
       {
+        ...engine,
         prompt: prompt.trim(),
         ratio,
         quality,
@@ -423,8 +483,7 @@ async function run(prompt, ratio, quality, parent, reference) {
       node,
     );
   } catch (error) {
-    if (nodeMap.value.has(node.id))
-      Object.assign(node, { status: "failed", error: error.message });
+    Object.assign(node, { status: "failed", error: error.message });
     props.store.toast(error.message);
   } finally {
     s.preparing--;
@@ -433,6 +492,38 @@ async function run(prompt, ratio, quality, parent, reference) {
   }
 }
 function action(name, node) {
+  if (name === "check-video") props.store.checkVideoEngine();
+  if (name === "cancel-video") {
+    const job = s.videoJobs.find((j) => j.id === node.jobId);
+    if (job) props.store.cancel(job);
+  }
+  if (name === "retry-video") {
+    const job = s.videoJobs.find((j) => j.id === node.jobId);
+    const parameters = node.videoParameters || job;
+    if (parameters) runVideo(node, null, parameters);
+    else props.store.toast("请在视频生成节点重新提交");
+  }
+  if (name === "video") {
+    const generator = add("video", {
+      x: node.x + nodeWidth(node) + 280,
+      y: node.y + 105,
+    });
+    board.value.edges.push({
+      id: crypto.randomUUID(),
+      from: node.id,
+      to: generator.id,
+      fromSide: "right",
+      toSide: "left",
+    });
+  }
+  if (name === "run-video") {
+    const incoming = references.value.get(node.id) || [];
+    if (incoming.length > 1) {
+      props.store.toast("一个视频节点只能连接一张参考图");
+      return;
+    }
+    runVideo(node, incoming[0]);
+  }
   if (name === "delete") remove(node.id);
   if (name === "zoom")
     s.preview = { url: node.url, caption: summarize(node.prompt) };
@@ -445,6 +536,7 @@ function action(name, node) {
       quality: node.quality || "2K",
       source: node,
     });
+    props.store.setNodeEngine(form, node);
     edit.value = true;
     nextTick(() => editComposer.value?.focus());
   }
@@ -456,37 +548,145 @@ function action(name, node) {
     const incoming = board.value.edges
       .filter((e) => e.to === node.id)
       .map((e) => nodeMap.value.get(e.from))
-      .filter((n) => n?.url);
+      .filter((n) => n?.url && n.kind !== "video");
     if (incoming.length > 1) {
       props.store.toast("一个文本节点只能连接一张参考图");
       return;
     }
-    run(node.prompt, node.ratio, node.quality, node, incoming[0]);
+    run(node.prompt, node.ratio, node.quality, node, incoming[0], node);
+  }
+}
+async function runVideo(parent, reference, restored) {
+  if (!s.ready || submittingParents.has(parent.id)) return;
+  const snapshot = JSON.parse(
+    JSON.stringify(
+      restored || {
+        prompt: parent.prompt,
+        dialogue: "",
+        quality: parent.quality,
+        ratio: parent.ratio,
+        seconds: parent.seconds,
+        framing: "contain",
+      },
+    ),
+  );
+  const dims = videoDimensions(snapshot.quality, snapshot.ratio);
+  if (!dims || !(snapshot.prompt?.trim() || snapshot.dialogue?.trim())) {
+    props.store.toast("请填写画面描述");
+    return;
+  }
+  const position = availablePosition(
+    board.value.nodes,
+    { x: parent.x + nodeWidth(parent) + 90, y: parent.y },
+    300,
+  );
+  const result = {
+    id: crypto.randomUUID(),
+    kind: "video",
+    status: "loading",
+    ...position,
+    jobId: null,
+    prompt: snapshot.prompt,
+    dialogue: snapshot.dialogue,
+    ratio: snapshot.ratio || "16:9",
+    quality: snapshot.quality,
+    width: dims.width,
+    height: dims.height,
+    createdAt: Date.now(),
+    preparing: !!reference,
+  };
+  board.value.nodes.push(result);
+  board.value.edges.push({
+    id: crypto.randomUUID(),
+    from: parent.id,
+    to: result.id,
+    fromSide: "right",
+    toSide: "left",
+  });
+  submittingParents.add(parent.id);
+  s.preparing++;
+  try {
+    if (reference) snapshot.sourceImage = await prepareSource(reference);
+    result.videoParameters = snapshot;
+    result.preparing = false;
+    await props.store.generateVideo(snapshot, result);
+  } catch (error) {
+    Object.assign(result, { status: "failed", error: error.message });
+    props.store.toast(error.message);
+  } finally {
+    result.preparing = false;
+    s.preparing--;
+    submittingParents.delete(parent.id);
   }
 }
 function submitEdit() {
   if (submittingParents.has(form.source?.id)) return;
   const source = form.source;
-  run(form.prompt, form.ratio, form.quality, source, source);
+  if (!s.ready || s.switching || apiUnavailable(form)) return;
+  run(form.prompt, form.ratio, form.quality, source, source, form);
   if (form.prompt.trim()) edit.value = false;
 }
 function close() {
+  fileDrop.reset();
   s.boardOpen = false;
   edit.value = false;
   menu.value = null;
   props.store.flush();
 }
 function drop(event) {
+  if (hasFiles(event)) {
+    fileDrop.drop(event);
+    return;
+  }
   const job = s.jobs.find(
     (j) => j.id === event.dataTransfer.getData("text/plain"),
   );
+  const video = s.videoJobs.find(
+    (j) => j.id === event.dataTransfer.getData("text/plain"),
+  );
+  if (video) {
+    props.store.addVideo(video, worldPoint(event.clientX, event.clientY));
+    return;
+  }
   if (job?.imageUrl) {
     const p = worldPoint(event.clientX, event.clientY);
     props.store.addImage(job, { x: p.x - 110, y: p.y - 100 });
   }
 }
+function dropFiles(files, event) {
+  if (!s.ready) {
+    props.store.toast("工作台正在加载，请稍后上传");
+    return;
+  }
+  menu.value = null;
+  const position = event.target.closest(".board-history-rail")
+    ? center()
+    : worldPoint(event.clientX, event.clientY);
+  const targetId = event.target.closest(".board-node")?.dataset.nodeId;
+  const target = nodeMap.value.get(targetId);
+  let count = 0;
+  let rejected = false;
+  for (const file of files) {
+    if (imageFileError(file)) {
+      rejected = true;
+      continue;
+    }
+    const destination =
+      count === 0 && target?.status === "empty"
+        ? { nodeId: target.id }
+        : { pos: { x: position.x + count * 250, y: position.y } };
+    uploadFile(file, destination);
+    count++;
+  }
+  if (rejected)
+    props.store.toast(
+      "已跳过不支持的文件，请上传 10MB 以内的 PNG、JPEG 或 WebP",
+    );
+}
 function key(event) {
   if (event.defaultPrevented || !s.boardOpen || s.preview) return;
+  if (document.fullscreenElement || event.target.closest("video,.video-player"))
+    return;
   if (event.key === "Escape" && event.repeat) return;
   if (event.isComposing) return;
   if (event.key === "Escape") {
@@ -536,6 +736,7 @@ watch(
   async (open) => {
     document.body.classList.toggle("board-open", open);
     if (open) {
+      props.store.checkVideoEngine();
       await nextTick();
       closeButton.value?.focus();
     } else document.querySelector("#openBoard")?.focus();
@@ -576,6 +777,34 @@ onBeforeUnmount(() => {
       </div>
       <div class="board-zoom-controls">
         <button
+          id="boardAddVideo"
+          class="ghost-button board-add-video"
+          @click="add('video', center())"
+        >
+          <AppIcon name="video" />视频节点
+        </button>
+        <button
+          :id="s.canUndoBoardClear ? 'boardUndoClear' : 'boardClear'"
+          class="ghost-button board-fit board-clear"
+          :disabled="!s.ready || (!s.canUndoBoardClear && !board.nodes.length)"
+          :title="
+            s.canUndoBoardClear
+              ? '恢复上一次清空的节点和连线'
+              : '清空节点和连线，图片仍保留在图片库'
+          "
+          @click="s.canUndoBoardClear ? store.undoClearBoard() : clearCanvas()"
+        >
+          <AppIcon :name="s.canUndoBoardClear ? 'undo' : 'trash'" />{{
+            s.canUndoBoardClear ? "撤销清空" : "清空画布"
+          }}
+        </button>
+        <span class="board-default-model">新节点默认</span>
+        <EngineSwitch
+          :store="store"
+          compact
+          @configure="$emit('configure-engine', $event)"
+        />
+        <button
           id="zoomOut"
           class="icon-button"
           aria-label="缩小"
@@ -615,6 +844,7 @@ onBeforeUnmount(() => {
       id="boardViewport"
       ref="viewport"
       class="board-viewport"
+      :class="{ 'is-file-dragging': draggingFiles }"
       :style="background"
       @pointerdown="down"
       @pointermove="move"
@@ -625,7 +855,9 @@ onBeforeUnmount(() => {
       "
       @wheel="wheel"
       @contextmenu="context"
-      @dragover.prevent
+      @dragenter="fileDrop.enter"
+      @dragleave="fileDrop.leave"
+      @dragover.prevent="fileDrop.over"
       @drop.prevent="drop"
     >
       <div id="boardWorld" ref="world" class="board-world" :style="transform">
@@ -651,13 +883,17 @@ onBeforeUnmount(() => {
           :key="node.id"
           :node="node"
           :selected="selected === node.id"
-          :disabled="!s.ready || submittingParents.has(node.id)"
-          :config="s.config"
+          :disabled="!s.ready || s.switching || submittingParents.has(node.id)"
+          :unavailable="apiUnavailable(node)"
+          :config="store.generationConfigFor(node)"
           :reference="references.get(node.id)?.[0]"
           :reference-count="references.get(node.id)?.length || 0"
+          :video-engine="s.videoEngine"
           @action="action"
+          @change-engine="store.setNodeEngine"
+          @configure-engine="$emit('configure-engine', $event)"
           @size="(id, size) => sizes.set(id, size)"
-          @dblclick="node.url && action('zoom', node)"
+          @dblclick="node.url && node.kind !== 'video' && action('zoom', node)"
         />
       </div>
       <div
@@ -667,17 +903,43 @@ onBeforeUnmount(() => {
       >
         <h3>画布是空的</h3>
         <p>
-          右键添加文本或图片节点，或从右侧历史记录拖入图片<br />把图片连入文本节点，可作为参考图编辑
+          将本地图片拖入画布即可上传，也可右键添加节点<br />把人物图片连入视频节点，填写画面描述即可生成视频
           · 拖动空白处平移 · 滚轮缩放
         </p>
       </div>
+      <div v-if="draggingFiles" class="board-file-drop" role="status">
+        <AppIcon name="upload" />
+        <strong>松开即可上传图片</strong>
+        <span>支持多张 · PNG / JPEG / WebP · 每张 ≤10MB</span>
+      </div>
       <aside id="boardRail" class="board-history-rail">
         <div class="board-rail-heading">
-          <strong>图片库</strong><span>{{ library.length }}</span>
+          <div class="board-library-tabs">
+            <button
+              :class="{ 'is-selected': libraryType === 'image' }"
+              @click="
+                libraryType = 'image';
+                libraryCount = 30;
+              "
+            >
+              图片库</button
+            ><button
+              :class="{ 'is-selected': libraryType === 'video' }"
+              @click="
+                libraryType = 'video';
+                libraryCount = 30;
+              "
+            >
+              视频库
+            </button>
+          </div>
+          <span>{{ library.length }}</span>
         </div>
         <div id="boardRailList" class="board-rail-list">
           <div v-if="!library.length" class="board-rail-empty">
-            还没有已完成的图片
+            {{
+              libraryType === "video" ? "还没有视频任务" : "还没有已完成的图片"
+            }}
           </div>
           <div
             v-for="job in library"
@@ -689,7 +951,11 @@ onBeforeUnmount(() => {
               (event) => event.dataTransfer.setData('text/plain', job.id)
             "
           >
+            <span v-if="job.mediaType === 'video'" class="board-rail-video-icon"
+              ><AppIcon name="video"
+            /></span>
             <SafeImage
+              v-else
               :src="job.imageUrl"
               :thumbnail="job.thumbnailUrl || job.imageUrl + '&thumbnail=1'"
               alt=""
@@ -697,12 +963,34 @@ onBeforeUnmount(() => {
               loading="lazy"
             />
             <div class="board-rail-item-info">
-              <strong>{{ summarize(job.prompt, 20) }}</strong
-              ><small>{{ job.ratio }} · {{ job.quality }}</small
+              <strong>{{ summarize(job.dialogue || job.prompt, 20) }}</strong
+              ><small
+                >{{ jobRatio(job) }} ·
+                <template v-if="job.mediaType === 'video'"
+                  >{{ job.quality }} ·
+                  {{
+                    {
+                      queued: "排队中",
+                      running: "生成中",
+                      completed: "已完成",
+                      failed: "失败",
+                      cancelled: "已取消",
+                    }[job.status]
+                  }}
+                  ·
+                </template>
+                <template v-else-if="job.provider !== 'api'"
+                  >{{ store.qualityLabel(job) }} ·
+                </template>
+                {{ job.provider === "api" ? "API" : "本地" }}</small
               ><button
                 class="board-rail-add"
                 :data-add-id="job.id"
-                @click="store.addImage(job, center())"
+                @click="
+                  job.mediaType === 'video'
+                    ? store.addVideo(job, center())
+                    : store.addImage(job, center())
+                "
               >
                 放入画布
               </button>
@@ -747,10 +1035,15 @@ onBeforeUnmount(() => {
         <GenerationComposer
           ref="editComposer"
           :model="form"
-          :config="s.config"
+          :config="store.generationConfigFor(form)"
           :reference="form.source"
           :reference-count="form.source ? 1 : 0"
-          :disabled="!s.ready || submittingParents.has(form.source?.id)"
+          :disabled="
+            !s.ready || s.switching || submittingParents.has(form.source?.id)
+          "
+          :unavailable="apiUnavailable(form)"
+          @change-engine="store.setNodeEngine(form, $event)"
+          @configure-engine="$emit('configure-engine', $event)"
           @submit="submitEdit"
           @remove-reference="form.source = null"
         />
@@ -765,6 +1058,12 @@ onBeforeUnmount(() => {
     >
       <button id="boardMenuText" role="menuitem" @click="addMenuNode('text')">
         <span>✎</span>增加文本节点</button
+      ><button
+        id="boardMenuVideo"
+        role="menuitem"
+        @click="addMenuNode('video')"
+      >
+        <AppIcon name="video" />增加视频节点</button
       ><button id="boardMenuAdd" role="menuitem" @click="addMenuNode('empty')">
         <span>＋</span>增加图片节点</button
       ><button id="boardMenuUpload" role="menuitem" @click="menuUpload">

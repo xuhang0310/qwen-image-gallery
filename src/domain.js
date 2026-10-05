@@ -1,4 +1,11 @@
 import defaults from "../shared/config.json";
+import { imageProfile, imageModels } from "../shared/image-models.mjs";
+import {
+  safeVideoUrl,
+  videoQualities,
+  videoRatios,
+  videoDurations,
+} from "../shared/video.mjs";
 export const pending = (job) => ["queued", "running"].includes(job?.status);
 export const label = (status) =>
   ({
@@ -13,6 +20,30 @@ export const summarize = (text, length = 34) =>
     .replace(/\s+/g, " ")
     .trim()
     .slice(0, length) || "未命名画面";
+export function imageRatio(width, height) {
+  if (
+    !Number.isSafeInteger(width) ||
+    !Number.isSafeInteger(height) ||
+    width <= 0 ||
+    height <= 0
+  )
+    return "";
+  let a = width,
+    b = height;
+  while (b) [a, b] = [b, a % b];
+  return `${width / a}:${height / a}`;
+}
+export function jobRatio(job) {
+  if (job?.provider === "api" && job.status === "completed") {
+    return (
+      imageRatio(
+        job.dimensions?.finalWidth || job.finalWidth,
+        job.dimensions?.finalHeight || job.finalHeight,
+      ) || job.ratio
+    );
+  }
+  return job?.ratio || "";
+}
 export const safeImageUrl = (url) =>
   typeof url === "string" &&
   /^\/api\/images\/(view|download)\?/.test(url) &&
@@ -23,14 +54,22 @@ export const sourceUrl = (source) =>
     filename: source.name,
     subfolder: source.subfolder,
     type: source.type,
+    ...(source.provider === "api" ? { provider: "api" } : {}),
   });
-export const nodeWidth = (node) => (node.status === "text" ? 480 : 220);
+export const nodeWidth = (node) =>
+  node.status === "text" ? 480 : node.kind === "video" ? 360 : 220;
 export const nodeHeight = (node) =>
   node.status === "text"
-    ? 440
-    : node.width && node.height
-      ? (220 * node.height) / node.width + 32
-      : 260;
+    ? node.kind === "video-generator"
+      ? 650
+      : 490
+    : node.kind === "video"
+      ? node.status === "done" && node.width && node.height
+        ? (360 * node.height) / node.width + 100
+        : 300
+      : node.width && node.height
+        ? (220 * node.height) / node.width + 32
+        : 260;
 export function availablePosition(nodes, position, height = 260) {
   const result = { ...position };
   for (let i = 0; i <= nodes.length; i++) {
@@ -50,13 +89,18 @@ export function availablePosition(nodes, position, height = 260) {
   return result;
 }
 export function normalizeJob(job) {
+  const config =
+    job?.provider === "api"
+      ? imageProfile(job.model || "gpt-image-2")
+      : defaults;
   if (
     !job ||
     typeof job.id !== "string" ||
     typeof job.prompt !== "string" ||
     !Number.isFinite(job.createdAt) ||
-    !Object.hasOwn(defaults.ratios, job.ratio) ||
-    !Object.hasOwn(defaults.qualities, job.quality) ||
+    !config ||
+    !Object.hasOwn(config.ratios, job.ratio) ||
+    !Object.hasOwn(config.qualities, job.quality) ||
     !["queued", "running", "completed", "failed", "cancelled"].includes(
       job.status,
     )
@@ -81,6 +125,24 @@ export function normalizeJob(job) {
     prompt: job.prompt.slice(0, 4000),
   };
 }
+export function normalizeVideoJob(job) {
+  if (
+    !job ||
+    job.mediaType !== "video" ||
+    typeof job.id !== "string" ||
+    typeof job.prompt !== "string" ||
+    !Number.isFinite(job.createdAt) ||
+    !Object.hasOwn(videoQualities, job.quality) ||
+    (job.ratio !== undefined && !Object.hasOwn(videoRatios, job.ratio)) ||
+    !["queued", "running", "completed", "failed", "cancelled"].includes(
+      job.status,
+    ) ||
+    (job.videoUrl && !safeVideoUrl(job.videoUrl)) ||
+    (job.downloadUrl && !safeVideoUrl(job.downloadUrl))
+  )
+    return null;
+  return { ...job, ...job.dimensions, ratio: job.ratio || "16:9" };
+}
 export function normalizeBoard(board = {}) {
   const ids = new Set();
   const nodes = (Array.isArray(board.nodes) ? board.nodes : [])
@@ -92,7 +154,9 @@ export function normalizeBoard(board = {}) {
         !Number.isFinite(n.x) ||
         !Number.isFinite(n.y) ||
         !["done", "loading", "failed", "empty", "text"].includes(n.status) ||
-        (n.url && !safeImageUrl(n.url))
+        (n.url &&
+          !(n.kind === "video" ? safeVideoUrl(n.url) : safeImageUrl(n.url))) ||
+        (n.kind === "video" && n.downloadUrl && !safeVideoUrl(n.downloadUrl))
       )
         return false;
       ids.add(n.id);
@@ -100,15 +164,40 @@ export function normalizeBoard(board = {}) {
     })
     .map((n) => {
       const node = { ...n, prompt: String(n.prompt || "").slice(0, 4000) };
+      if (node.kind === "video-generator" || node.kind === "video") {
+        if (!Object.hasOwn(videoRatios, node.ratio)) node.ratio = "16:9";
+        if (!Object.hasOwn(videoQualities, node.quality)) node.quality = "480P";
+        node.dialogue = String(node.dialogue || "").slice(0, 200);
+        if (node.kind === "video-generator") {
+          node.status = "text";
+          if (!videoDurations.includes(node.seconds)) node.seconds = 6;
+          if (!["contain", "cover", "front"].includes(node.framing))
+            node.framing = "contain";
+        }
+        if (node.duration && !Number.isFinite(node.duration))
+          delete node.duration;
+        return node;
+      }
       if (node.uploading)
         Object.assign(node, {
           status: "empty",
           uploading: false,
           error: "上次上传已中断，请重新上传",
         });
-      if (node.ratio && !Object.hasOwn(defaults.ratios, node.ratio))
+      const apiConfigs = imageModels().map((model) => imageProfile(model.id));
+      if (
+        node.ratio &&
+        !Object.hasOwn(defaults.ratios, node.ratio) &&
+        !apiConfigs.some((config) => Object.hasOwn(config.ratios, node.ratio))
+      )
         node.ratio = "9:16";
-      if (node.quality && !Object.hasOwn(defaults.qualities, node.quality))
+      if (
+        node.quality &&
+        !Object.hasOwn(defaults.qualities, node.quality) &&
+        !apiConfigs.some((config) =>
+          Object.hasOwn(config.qualities, node.quality),
+        )
+      )
         node.quality = "2K";
       return node;
     });

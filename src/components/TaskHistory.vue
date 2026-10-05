@@ -1,6 +1,6 @@
 <script setup>
 import { computed, ref } from "vue";
-import { label, summarize, pending } from "../domain";
+import { label, summarize, pending, jobRatio } from "../domain";
 import SafeImage from "./SafeImage.vue";
 import AppIcon from "./AppIcon.vue";
 const props = defineProps({ store: Object });
@@ -67,9 +67,14 @@ const time = (timestamp) =>
             ><span>·</span><span>{{ time(job.createdAt) }}</span>
           </div>
           <div class="task-tags">
-            <span>{{ job.ratio }}</span
-            ><span>{{ s.config.qualities[job.quality].label }}</span
+            <span>{{ jobRatio(job) }}</span
+            ><span v-if="job.provider !== 'api'">{{
+              store.qualityLabel(job)
+            }}</span
             ><span>{{ job.mode === "img2img" ? "图像编辑" : "文生图" }}</span>
+            <span :title="job.model">{{
+              job.provider === "api" ? `${job.model} · API` : "本地 Qwen"
+            }}</span>
           </div>
           <small v-if="job.connectionError" class="connection-warning">{{
             job.connectionError

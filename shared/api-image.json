@@ -1,0 +1,113 @@
+{
+  "models": [
+    {
+      "id": "gpt-image-2",
+      "label": "GPT Image 2",
+      "profile": "image2"
+    },
+    {
+      "id": "gpt-image-2.5-flare",
+      "label": "GPT Image 2.5 · Flare",
+      "profile": "image25"
+    },
+    {
+      "id": "gpt-image-2.5-sunburst",
+      "label": "GPT Image 2.5 · Sunburst",
+      "profile": "image25"
+    }
+  ],
+  "legacyModelAliases": {
+    "gpt-image-2-2026-04-21": "gpt-image-2",
+    "gpt-image-2.5-flare-2026-09-08": "gpt-image-2.5-flare",
+    "gpt-image-2.5-sunburst-2026-09-08": "gpt-image-2.5-sunburst"
+  },
+  "qualities": {
+    "1K": {
+      "label": "草稿",
+      "hint": "low · 快速预览",
+      "apiQuality": "low"
+    },
+    "2K": {
+      "label": "标准",
+      "hint": "medium · 标准细节",
+      "apiQuality": "medium"
+    },
+    "4K": {
+      "label": "高质量",
+      "hint": "high · 更高细节，费用和等待时间更高",
+      "apiQuality": "high"
+    }
+  },
+  "ratios": {
+    "1:1": {
+      "label": "方形",
+      "hint": "方形画面",
+      "1K": [1024, 1024],
+      "2K": [2048, 2048],
+      "4K": [2880, 2880]
+    },
+    "16:9": {
+      "label": "横屏",
+      "hint": "横向宽幅",
+      "1K": [1280, 720],
+      "2K": [2048, 1152],
+      "4K": [3840, 2160]
+    },
+    "9:16": {
+      "label": "竖屏",
+      "hint": "纵向长幅",
+      "1K": [720, 1280],
+      "2K": [1152, 2048],
+      "4K": [2160, 3840]
+    },
+    "4:3": {
+      "label": "经典横幅",
+      "hint": "经典横幅",
+      "1K": [1024, 768],
+      "2K": [2048, 1536],
+      "4K": [3264, 2448]
+    },
+    "3:4": {
+      "label": "经典竖幅",
+      "hint": "经典竖幅",
+      "1K": [768, 1024],
+      "2K": [1536, 2048],
+      "4K": [2448, 3264]
+    },
+    "3:2": {
+      "label": "摄影横幅",
+      "hint": "摄影横幅",
+      "1K": [1152, 768],
+      "2K": [1920, 1280],
+      "4K": [3456, 2304]
+    }
+  },
+  "profiles": {
+    "image2": {
+      "note": "GPT Image 2 原生尺寸；结果以服务实际返回为准。"
+    },
+    "image25": {
+      "extraQualities": {
+        "AUTO": {
+          "label": "自动",
+          "hint": "auto · 由模型选择质量",
+          "apiQuality": "auto",
+          "dimensionQuality": "2K"
+        },
+        "XH": {
+          "label": "极高",
+          "hint": "xhigh · 极高细节，费用和等待时间更高",
+          "apiQuality": "xhigh",
+          "dimensionQuality": "4K"
+        },
+        "MAX": {
+          "label": "最高",
+          "hint": "max · 最高细节，费用和等待时间更高",
+          "apiQuality": "max",
+          "dimensionQuality": "4K"
+        }
+      },
+      "note": "GPT Image 2.5 支持自动、极高和最高质量；实际权限由服务决定。"
+    }
+  }
+}

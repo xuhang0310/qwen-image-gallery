@@ -1,9 +1,17 @@
-import { reactive, watch, onBeforeUnmount } from "vue";
+import { reactive, computed, watch, onBeforeUnmount } from "vue";
 import defaults from "../../shared/config.json";
+import { imageFileError } from "../image-upload";
+import apiProfile from "../../shared/api-image.json";
+import {
+  imageProfile,
+  imageModels,
+  fitImageParameters,
+} from "../../shared/image-models.mjs";
 import {
   pending,
   availablePosition,
   normalizeJob,
+  normalizeVideoJob,
   normalizeBoard,
   sourceUrl,
   request,
@@ -20,14 +28,30 @@ const read = (key, fallback) => {
     return fallback;
   }
 };
+const normalizeEngine = (engine) => ({
+  ...engine,
+  model: imageProfile(engine.model)?.model || "gpt-image-2",
+  models: imageModels(engine.models?.map((model) => model.id)),
+});
 
 export function useWorkbench() {
   const s = reactive({
     ready: false,
     config: structuredClone(defaults),
+    engine: {
+      provider: "local",
+      model: "gpt-image-2",
+      baseUrl: "https://api.openai.com/v1",
+      keyConfigured: false,
+      models: apiProfile.models,
+    },
+    switching: false,
     jobs: [],
+    videoJobs: [],
+    videoEngine: { ready: false, checking: true },
     hiddenJobIds: [],
     board: normalizeBoard(),
+    canUndoBoardClear: false,
     selectedJobId: null,
     submitting: false,
     preparing: 0,
@@ -53,10 +77,72 @@ export function useWorkbench() {
     },
   });
   const polls = new Map();
+  const modelConfigs = computed(() => ({
+    local: { ...s.config, provider: "local", model: "Qwen Image 2.1" },
+    ...Object.fromEntries(
+      imageModels().map(({ id }) => [id, { ...s.config, ...imageProfile(id) }]),
+    ),
+  }));
+  function engineSelection(selection = s.engine) {
+    const provider = ["local", "api"].includes(selection?.provider)
+      ? selection.provider
+      : s.engine.provider;
+    return {
+      provider,
+      model:
+        provider === "api"
+          ? imageProfile(selection?.model)?.model ||
+            imageProfile(s.engine.model)?.model ||
+            "gpt-image-2"
+          : "Qwen Image 2.1",
+    };
+  }
+  function generationConfigFor(selection) {
+    const engine = engineSelection(selection);
+    return modelConfigs.value[
+      engine.provider === "api" ? engine.model : "local"
+    ];
+  }
+  function setNodeEngine(node, selection) {
+    const engine = engineSelection(selection);
+    Object.assign(
+      node,
+      engine,
+      fitImageParameters(node, generationConfigFor(engine)),
+    );
+  }
+  function restoreNodeEngines(board) {
+    for (const node of board.nodes)
+      if (node.status === "text" && node.kind !== "video-generator")
+        setNodeEngine(node, node);
+    return board;
+  }
+  const generationConfig = computed(() => generationConfigFor(s.engine));
+  watch(
+    generationConfig,
+    (config) => {
+      Object.assign(s.form, fitImageParameters(s.form, config));
+    },
+    { flush: "sync" },
+  );
+  const engineParameters = (selection) => {
+    const engine = engineSelection(selection);
+    return {
+      provider: engine.provider,
+      model: engine.provider === "api" ? engine.model : undefined,
+    };
+  };
+  const qualityLabel = (job) => {
+    return job?.provider === "api"
+      ? ""
+      : s.config.qualities[job?.quality]?.label || "";
+  };
+  let healthRequest = 0;
   let disposed = false,
     saveTimer,
     saveChain = Promise.resolve(),
     toastTimer,
+    clearedBoard,
     uploadToken = 0,
     dirty = false,
     savingCount = 0,
@@ -67,14 +153,18 @@ export function useWorkbench() {
     JSON.parse(
       JSON.stringify({
         jobs: s.jobs,
+        videoJobs: s.videoJobs,
         board: s.board,
         hiddenJobIds: s.hiddenJobIds,
       }),
     );
   // Only a submission from the main form locks that form briefly.
-  const busy = () => s.submitting;
+  const busy = () => s.submitting || s.switching;
   const hasActiveJobs = () =>
-    s.inFlight > 0 || s.preparing > 0 || s.jobs.some(pending);
+    s.inFlight > 0 ||
+    s.preparing > 0 ||
+    s.jobs.some(pending) ||
+    s.videoJobs.some(pending);
   function toast(message) {
     s.toast = message;
     clearTimeout(toastTimer);
@@ -142,9 +232,22 @@ export function useWorkbench() {
       flush();
     }, 300);
   }
-  watch(() => s.board, changed, { deep: true, flush: "sync" });
   watch(
-    () => [s.jobs, s.hiddenJobIds],
+    () => s.board,
+    () => {
+      if (
+        s.canUndoBoardClear &&
+        (s.board.nodes.length || s.board.edges.length)
+      ) {
+        clearedBoard = null;
+        s.canUndoBoardClear = false;
+      }
+      changed();
+    },
+    { deep: true, flush: "sync" },
+  );
+  watch(
+    () => [s.jobs, s.videoJobs, s.hiddenJobIds],
     () => {
       changed();
       if (s.ready) backup();
@@ -153,16 +256,75 @@ export function useWorkbench() {
   );
 
   async function checkHealth() {
+    const requestId = ++healthRequest;
+    const provider = s.engine.provider;
     try {
-      const result = await request("/api/health");
-      s.health = { ...result, state: result.connected ? "online" : "offline" };
+      const result = await request("/api/health?provider=" + provider);
+      if (requestId === healthRequest && provider === s.engine.provider) {
+        s.health = {
+          ...result,
+          state: result.connected ? "online" : "offline",
+        };
+        if (provider === "api" && result.models)
+          s.engine.models = imageModels(result.models.map((model) => model.id));
+      }
     } catch (error) {
-      s.health = { state: "offline", error: error.message };
+      if (requestId === healthRequest)
+        s.health = { state: "offline", error: error.message };
+    }
+  }
+  async function saveEngine(values) {
+    if (s.switching) throw new Error("正在切换，请稍候");
+    s.switching = true;
+    try {
+      s.engine = normalizeEngine(
+        await request("/api/engine", jsonOptions(values)),
+      );
+      s.health = { state: "checking" };
+      void checkHealth();
+      return s.engine;
+    } finally {
+      s.switching = false;
+    }
+  }
+  async function switchEngine(provider) {
+    try {
+      await saveEngine({ provider });
+    } catch (error) {
+      toast(error.message);
     }
   }
   function syncNode(job) {
     for (const node of s.board.nodes.filter((n) => n.jobId === job.id)) {
       node.jobStatus = job.status;
+      node.provider = job.provider || "local";
+      node.model = job.model;
+      if (job.mediaType === "video") {
+        Object.assign(node, {
+          kind: "video",
+          ratio: job.ratio || "16:9",
+          duration: job.duration,
+          dialogue: job.dialogue,
+          connectionError: job.connectionError,
+          sampleStep: job.sampleStep,
+          sampleTotal: job.sampleTotal,
+          stage: job.stage,
+        });
+        if (job.status === "completed" && job.videoUrl)
+          Object.assign(node, {
+            status: "done",
+            url: job.videoUrl,
+            downloadUrl: job.downloadUrl,
+            width: job.finalWidth || job.dimensions?.finalWidth,
+            height: job.finalHeight || job.dimensions?.finalHeight,
+          });
+        else if (["failed", "cancelled"].includes(job.status))
+          Object.assign(node, {
+            status: "failed",
+            error: job.error || "任务已结束",
+          });
+        continue;
+      }
       if (job.status === "completed" && job.imageUrl)
         Object.assign(node, {
           status: "done",
@@ -177,6 +339,107 @@ export function useWorkbench() {
           error: job.error || "任务已结束",
         });
     }
+  }
+  async function checkVideoEngine() {
+    s.videoEngine.checking = true;
+    try {
+      s.videoEngine = {
+        ...(await request("/api/videos/config")),
+        checking: false,
+      };
+    } catch (error) {
+      s.videoEngine = { ready: false, checking: false, error: error.message };
+    }
+  }
+  function pollVideo(id) {
+    if (polls.has(id) || disposed) return;
+    const poll = { failures: 0, timer: null, controller: null };
+    polls.set(id, poll);
+    async function tick() {
+      const job = s.videoJobs.find((j) => j.id === id);
+      if (!job || !pending(job) || disposed) return stopPoll(id);
+      poll.controller = new AbortController();
+      const timeout = setTimeout(() => poll.controller.abort(), 25000);
+      try {
+        const data = await request(
+          "/api/videos/jobs/" + encodeURIComponent(id),
+          { signal: poll.controller.signal },
+        );
+        if (polls.get(id) !== poll || !s.videoJobs.includes(job)) return;
+        const normalized = normalizeVideoJob(data);
+        if (!normalized) throw new Error("视频任务状态暂时不可用");
+        Object.assign(job, normalized);
+        delete job.connectionError;
+        poll.failures = 0;
+        syncNode(job);
+        if (!pending(job)) return stopPoll(id);
+      } catch (error) {
+        if (polls.get(id) !== poll || disposed) return;
+        job.connectionError = "连接暂时中断，自动重试中";
+        syncNode(job);
+        poll.failures++;
+      } finally {
+        clearTimeout(timeout);
+      }
+      if (polls.get(id) === poll)
+        poll.timer = setTimeout(
+          tick,
+          Math.min(15000, 2500 * 2 ** Math.min(poll.failures, 3)),
+        );
+    }
+    tick();
+  }
+  async function generateVideo(parameters, node) {
+    s.inFlight++;
+    try {
+      const data = await request("/api/videos/generate", {
+        ...jsonOptions(parameters),
+        signal: AbortSignal.timeout(90000),
+      });
+      const job = normalizeVideoJob(data);
+      if (!job) throw new Error("视频服务返回了无效任务");
+      s.videoJobs.unshift(job);
+      Object.assign(node, {
+        jobId: job.id,
+        jobStatus: job.status,
+        duration: job.duration,
+        createdAt: job.createdAt,
+        kind: "video",
+      });
+      pollVideo(job.id);
+      return job;
+    } catch (error) {
+      Object.assign(node, { status: "failed", error: error.message });
+      toast(error.message);
+      return null;
+    } finally {
+      s.inFlight--;
+    }
+  }
+  function addVideo(job, position = { x: 200, y: 120 }) {
+    const existing = s.board.nodes.find((n) => n.jobId === job.id);
+    if (existing) return existing;
+    const node = {
+      id: crypto.randomUUID(),
+      jobId: job.id,
+      kind: "video",
+      status: pending(job)
+        ? "loading"
+        : job.status === "completed"
+          ? "done"
+          : "failed",
+      ...availablePosition(s.board.nodes, position, 300),
+      prompt: job.prompt,
+      dialogue: job.dialogue,
+      ratio: job.ratio || "16:9",
+      quality: job.quality,
+      createdAt: job.createdAt,
+      width: job.finalWidth || job.dimensions?.finalWidth,
+      height: job.finalHeight || job.dimensions?.finalHeight,
+    };
+    s.board.nodes.push(node);
+    syncNode(job);
+    return node;
   }
   function stopPoll(id) {
     const poll = polls.get(id);
@@ -212,6 +475,10 @@ export function useWorkbench() {
             Object.entries({
               status: data.status,
               error: data.error,
+              dimensions: data.dimensions,
+              usage: data.usage,
+              apiResult: data.apiResult,
+              completedAt: data.completedAt,
               ...data.dimensions,
               seed: data.seed,
               imageUrl: data.imageUrls?.[0]?.url,
@@ -225,11 +492,6 @@ export function useWorkbench() {
         syncNode(job);
         if (!pending(job)) {
           stopPoll(id);
-          if (
-            job.status === "completed" &&
-            !s.board.nodes.some((n) => n.jobId === id)
-          )
-            addImage(job);
           return;
         }
       } catch (error) {
@@ -254,12 +516,14 @@ export function useWorkbench() {
     const legacyBoard = normalizeBoard(read(BOARD_KEY, {}));
     const localBackup = read(BACKUP_KEY, null);
     try {
-      const [project, data, config] = await Promise.all([
+      const [project, data, config, videos] = await Promise.all([
         request("/api/project"),
         request("/api/jobs"),
         request("/api/config"),
+        request("/api/videos/jobs"),
       ]);
       Object.assign(s.config, config);
+      if (config.engine) s.engine = normalizeEngine(config.engine);
       s.revision = project.revision;
       const restored = localBackup?.dirty
         ? localBackup
@@ -275,6 +539,14 @@ export function useWorkbench() {
         if (!s.hiddenJobIds.includes(job.id) || pending(job))
           map.set(job.id, job);
       s.jobs = [...map.values()].sort((a, b) => b.createdAt - a.createdAt);
+      s.videoJobs = [
+        ...new Map(
+          [...(restored.videoJobs || []), ...(videos.jobs || [])]
+            .map(normalizeVideoJob)
+            .filter(Boolean)
+            .map((j) => [j.id, j]),
+        ).values(),
+      ].sort((a, b) => b.createdAt - a.createdAt);
       s.board = normalizeBoard(restored.board);
       s.saved = "saved";
     } catch (error) {
@@ -282,13 +554,17 @@ export function useWorkbench() {
         .map(normalizeJob)
         .filter(Boolean);
       s.board = normalizeBoard(localBackup?.board || legacyBoard);
+      s.videoJobs = (localBackup?.videoJobs || [])
+        .map(normalizeVideoJob)
+        .filter(Boolean);
       s.saved = "error";
       s.saveError = "本地服务暂时不可用，已恢复浏览器备份";
       toast(error.message);
     }
+    restoreNodeEngines(s.board);
     s.ready = true;
     for (const node of s.board.nodes) {
-      const job = s.jobs.find((j) => j.id === node.jobId);
+      const job = [...s.jobs, ...s.videoJobs].find((j) => j.id === node.jobId);
       if (job) syncNode(job);
       else if (node.status === "loading")
         Object.assign(node, {
@@ -298,18 +574,16 @@ export function useWorkbench() {
     }
     s.selectedJobId = s.jobs.find(pending)?.id || s.jobs[0]?.id || null;
     for (const job of s.jobs.filter(pending)) pollJob(job.id);
+    for (const job of s.videoJobs.filter(pending)) pollVideo(job.id);
+    checkVideoEngine();
     changed();
     checkHealth();
     healthTimer = setInterval(checkHealth, 15000);
   }
 
   async function uploadSource(file) {
-    if (
-      !file ||
-      file.size > 10 * 1024 * 1024 ||
-      !["image/png", "image/jpeg", "image/webp"].includes(file.type)
-    )
-      throw new Error("请选择 10MB 以内的 PNG、JPEG 或 WebP");
+    const error = imageFileError(file);
+    if (error) throw new Error(error);
     const body = new FormData();
     body.append("image", file);
     return (await request("/api/upload", { method: "POST", body })).sourceImage;
@@ -320,7 +594,7 @@ export function useWorkbench() {
     Object.assign(s.form, {
       sourceImage: null,
       uploading: true,
-      uploadStatus: "正在上传到本地 ComfyUI…",
+      uploadStatus: "正在保存参考图…",
     });
     try {
       const source = await uploadSource(file);
@@ -356,11 +630,14 @@ export function useWorkbench() {
     s.inFlight++;
     const order = ++submissionOrder;
     const submittedAt = Date.now();
-    const snapshotParams = JSON.parse(JSON.stringify(parameters));
+    const snapshotParams = JSON.parse(
+      JSON.stringify({ ...engineParameters(), ...parameters }),
+    );
     try {
       const data = await request("/api/generate", jsonOptions(snapshotParams));
       const job = {
         ...snapshotParams,
+        ...data,
         id: data.promptId,
         status: "queued",
         createdAt: data.createdAt || submittedAt,
@@ -370,15 +647,16 @@ export function useWorkbench() {
       s.jobs.unshift(job);
       s.jobs.sort((a, b) => b.createdAt - a.createdAt);
       if (order === submissionOrder) s.selectedJobId = job.id;
-      if (node && s.board.nodes.includes(node)) {
+      if (node) {
         node.jobId = job.id;
         node.jobStatus = "queued";
+        node.provider = job.provider;
+        node.model = job.model;
       }
       pollJob(job.id);
       return job;
     } catch (error) {
-      if (node && s.board.nodes.includes(node))
-        Object.assign(node, { status: "failed", error: error.message });
+      if (node) Object.assign(node, { status: "failed", error: error.message });
       toast(error.message);
       return null;
     } finally {
@@ -399,7 +677,10 @@ export function useWorkbench() {
       negativePrompt: f.negativePrompt.trim(),
       ratio: f.ratio,
       quality: f.quality,
-      seed: f.fixedSeed ? Number(f.seed) : undefined,
+      seed:
+        s.engine.provider === "local" && f.fixedSeed
+          ? Number(f.seed)
+          : undefined,
       mode: f.mode,
       sourceImage: f.mode === "img2img" ? f.sourceImage : undefined,
     });
@@ -410,8 +691,7 @@ export function useWorkbench() {
     Object.assign(s.form, {
       prompt: job.prompt,
       negativePrompt: job.negativePrompt || "",
-      ratio: job.ratio,
-      quality: job.quality,
+      ...fitImageParameters(job, generationConfig.value),
       fixedSeed: true,
       seed: job.seed ?? "",
       mode: job.mode || "txt2img",
@@ -423,6 +703,8 @@ export function useWorkbench() {
     });
     return generate({
       prompt: job.prompt,
+      provider: job.provider || "local",
+      model: job.provider === "api" ? job.model : undefined,
       negativePrompt: job.negativePrompt || "",
       ratio: job.ratio,
       quality: job.quality,
@@ -451,12 +733,22 @@ export function useWorkbench() {
   }
   async function cancel(job) {
     try {
-      await request(
-        "/api/jobs/" + encodeURIComponent(job.id) + "/cancel",
+      const result = await request(
+        (job.mediaType === "video" ? "/api/videos/jobs/" : "/api/jobs/") +
+          encodeURIComponent(job.id) +
+          "/cancel",
         jsonOptions({}),
       );
       stopPoll(job.id);
-      Object.assign(job, { status: "cancelled", error: "任务已取消" });
+      if (job.mediaType === "video") {
+        Object.assign(job, normalizeVideoJob(result) || result);
+        syncNode(job);
+        return;
+      }
+      Object.assign(job, {
+        status: result.status || "cancelled",
+        error: result.error || "任务已取消",
+      });
       syncNode(job);
     } catch (error) {
       toast(error.message);
@@ -489,9 +781,27 @@ export function useWorkbench() {
       prompt: job.prompt,
       ratio: job.ratio,
       quality: job.quality,
+      provider: job.provider || "local",
+      model: job.model,
     };
     s.board.nodes.push(node);
     return node;
+  }
+  function clearBoard() {
+    if (!s.ready || !s.board.nodes.length) return;
+    clearedBoard = s.board;
+    s.board = normalizeBoard();
+    s.canUndoBoardClear = true;
+    toast("画布已清空，图片仍保留在图片库");
+  }
+  function undoClearBoard() {
+    if (!s.ready || !clearedBoard) return;
+    const restored = clearedBoard;
+    clearedBoard = null;
+    s.canUndoBoardClear = false;
+    s.board = restored;
+    for (const job of [...s.jobs, ...s.videoJobs]) syncNode(job);
+    toast("已恢复画布");
   }
   function exportProject() {
     const content = JSON.stringify(
@@ -524,8 +834,10 @@ export function useWorkbench() {
         throw new Error("请选择有效的 Qwen 项目文件");
       if (hasActiveJobs()) throw new Error("请等待当前任务结束后再导入项目");
       const jobs = data.jobs.map(normalizeJob);
+      const videoJobs = (data.videoJobs || []).map(normalizeVideoJob);
+      if (videoJobs.some((j) => !j)) throw new Error("项目包含无效的视频记录");
       if (jobs.some((j) => !j)) throw new Error("项目包含无效的历史记录");
-      const board = normalizeBoard(data.board);
+      const board = restoreNodeEngines(normalizeBoard(data.board));
       if (
         board.nodes.length !== data.board.nodes.length ||
         board.edges.length !== data.board.edges.length
@@ -537,6 +849,7 @@ export function useWorkbench() {
         jsonOptions(
           {
             jobs,
+            videoJobs,
             board,
             hiddenJobIds: data.hiddenJobIds || [],
             revision: s.revision,
@@ -545,9 +858,13 @@ export function useWorkbench() {
         ),
       );
       s.ready = false;
+      clearedBoard = null;
+      s.canUndoBoardClear = false;
       s.revision = result.revision;
       s.jobs = jobs;
+      s.videoJobs = videoJobs;
       s.board = board;
+      for (const job of [...jobs, ...videoJobs]) syncNode(job);
       s.hiddenJobIds = data.hiddenJobIds || [];
       s.selectedJobId = jobs[0]?.id || null;
       s.ready = true;
@@ -557,6 +874,7 @@ export function useWorkbench() {
       s.saveError = "";
       backup();
       for (const job of jobs.filter(pending)) pollJob(job.id);
+      for (const job of videoJobs.filter(pending)) pollVideo(job.id);
       toast("项目已导入");
     } catch (error) {
       toast(error.message);
@@ -586,15 +904,28 @@ export function useWorkbench() {
     uploadSource,
     removeSource,
     generate,
+    generateVideo,
+    addVideo,
+    checkVideoEngine,
     submitForm,
     retry,
     deleteJob,
     cancel,
     clearHistory,
     addImage,
+    clearBoard,
+    undoClearBoard,
     exportProject,
     importProject,
     checkHealth,
     sourceUrl,
+    generationConfig,
+    generationConfigFor,
+    engineSelection,
+    setNodeEngine,
+    engineParameters,
+    qualityLabel,
+    saveEngine,
+    switchEngine,
   };
 }

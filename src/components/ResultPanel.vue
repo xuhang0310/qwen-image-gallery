@@ -1,6 +1,6 @@
 <script setup>
 import { computed, ref, onBeforeUnmount } from "vue";
-import { summarize, pending } from "../domain";
+import { summarize, pending, jobRatio } from "../domain";
 import SafeImage from "./SafeImage.vue";
 import AppIcon from "./AppIcon.vue";
 const props = defineProps({ store: Object });
@@ -25,7 +25,7 @@ const dims = computed(() =>
         job.value.finalWidth || job.value.width,
         job.value.finalHeight || job.value.height,
       ]
-    : s.config.ratios[s.form.ratio][s.form.quality],
+    : props.store.generationConfig.value.ratios[s.form.ratio][s.form.quality],
 );
 function preview() {
   if (job.value?.imageUrl)
@@ -133,10 +133,10 @@ function example() {
             :alt="summarize(job?.prompt)"
           />
           <div class="image-overlay">
-            <span id="resultQuality">{{
-              s.config.qualities[job?.quality]?.label
+            <span v-if="job?.provider !== 'api'" id="resultQuality">{{
+              store.qualityLabel(job)
             }}</span
-            ><span id="resultRatio">{{ job?.ratio }}</span>
+            ><span id="resultRatio">{{ jobRatio(job) }}</span>
           </div>
           <span class="preview-hint">点击放大</span>
         </div>
@@ -154,9 +154,12 @@ function example() {
         </div>
         <div id="resultDetails" class="result-details">
           <span>{{ dims[0] }} × {{ dims[1] }} px</span
-          ><span>种子 {{ job?.seed }}</span
+          ><span v-if="job?.provider !== 'api'">种子 {{ job?.seed }}</span
+          ><span v-else>{{ job?.model }} · API</span
           ><span>{{
-            job?.quality === "4K" ? "精细生图 + 超分" : "原生生成"
+            job?.provider !== "api" && job?.quality === "4K"
+              ? "精细生图 + 超分"
+              : "原生生成"
           }}</span>
         </div>
       </div>
@@ -182,9 +185,18 @@ function example() {
       <span
         ><i class="footer-dot"></i
         ><span id="canvasFooterText">{{
-          s.health.state === "online"
-            ? `本地生成 · 队列 ${s.health.queue || 0} 个任务`
-            : "请先启动 ComfyUI 本地服务"
+          s.engine.provider === "api"
+            ? s.health.state === "online"
+              ? "API 模型已连接"
+              : s.health.state === "checking"
+                ? "正在检查 API 连接…"
+                : s.health.error ||
+                  (s.engine.keyConfigured ? "API 暂未连接" : "请配置 API 密钥")
+            : s.health.state === "online"
+              ? `本地生成 · 队列 ${s.health.queue || 0} 个任务`
+              : s.health.state === "checking"
+                ? "正在检查本地引擎…"
+                : "请先启动 ComfyUI 本地服务"
         }}</span></span
       ><span>支持中文提示词</span>
     </div>

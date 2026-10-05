@@ -3,3 +3,11 @@ dist/
 .data/
 .run/
 *.local.json
+deliverables/
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+__pycache__/
+*.pyc

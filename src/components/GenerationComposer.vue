@@ -3,21 +3,29 @@ import { ref } from "vue";
 import SafeImage from "./SafeImage.vue";
 import AppIcon from "./AppIcon.vue";
 import GenerationParameters from "./GenerationParameters.vue";
+import NodeModelSelect from "./NodeModelSelect.vue";
 const props = defineProps({
   model: Object,
   config: Object,
   reference: Object,
   referenceCount: { type: Number, default: 0 },
   disabled: Boolean,
+  unavailable: Boolean,
   nodeId: String,
 });
-const emit = defineEmits(["submit", "remove-reference"]);
+const emit = defineEmits([
+  "submit",
+  "remove-reference",
+  "change-engine",
+  "configure-engine",
+]);
 const input = ref();
 function enter(event) {
   if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
     event.preventDefault();
     event.stopPropagation();
-    if (!props.disabled && props.referenceCount <= 1) emit("submit");
+    if (!props.disabled && !props.unavailable && props.referenceCount <= 1)
+      emit("submit");
   }
 }
 defineExpose({ focus: () => input.value?.focus() });
@@ -72,20 +80,38 @@ defineExpose({ focus: () => input.value?.focus() });
       <span class="composer-count">{{ model.prompt.length }} / 4000</span>
     </div>
     <div class="composer-toolbar">
-      <GenerationParameters :model="model" :config="config" />
+      <div class="composer-options">
+        <NodeModelSelect
+          :provider="config.provider"
+          :model="config.model"
+          :disabled="disabled"
+          @change="emit('change-engine', $event)"
+        />
+        <GenerationParameters :model="model" :config="config" />
+      </div>
       <button
         type="button"
         class="primary-button composer-submit"
         :id="nodeId ? undefined : 'boardEditSubmit'"
         :data-action="nodeId ? 'run' : undefined"
-        :disabled="disabled || !model.prompt.trim() || referenceCount > 1"
+        :disabled="
+          disabled || unavailable || !model.prompt.trim() || referenceCount > 1
+        "
         @click="emit('submit')"
       >
         {{ disabled ? "正在提交…" : "生成图片" }}<AppIcon name="arrow" />
       </button>
     </div>
     <div class="composer-shortcut">
-      Enter 生成 <span>·</span> Shift + Enter 换行
+      <button
+        v-if="unavailable"
+        type="button"
+        class="composer-configure"
+        @click="emit('configure-engine', 'api')"
+      >
+        先配置 API 密钥
+      </button>
+      <template v-else>Enter 生成 <span>·</span> Shift + Enter 换行</template>
     </div>
   </div>
 </template>

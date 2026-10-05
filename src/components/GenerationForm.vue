@@ -1,10 +1,28 @@
 <script setup>
 import { computed } from "vue";
 import AppIcon from "./AppIcon.vue";
+import { useFileDrop } from "../composables/useFileDrop";
+import { imageFileError } from "../image-upload";
 const props = defineProps({ store: Object });
 const { s } = props.store;
 const f = s.form;
-const dims = computed(() => s.config.ratios[f.ratio][f.quality]);
+const config = props.store.generationConfig;
+const fileDrop = useFileDrop((files) => {
+  if (!files.length) return;
+  if (files.length > 1) {
+    props.store.toast("图生图一次使用一张参考图，请只拖入一张图片");
+    return;
+  }
+  const error = imageFileError(files[0]);
+  if (error) {
+    props.store.toast(error);
+    return;
+  }
+  f.mode = "img2img";
+  props.store.upload(files[0]);
+});
+const draggingFiles = fileDrop.active;
+const dims = computed(() => config.value.ratios[f.ratio][f.quality]);
 const activeCount = computed(
   () =>
     s.jobs.filter((job) => ["queued", "running"].includes(job.status)).length,
@@ -12,6 +30,8 @@ const activeCount = computed(
 const disabled = computed(
   () =>
     !s.ready ||
+    s.switching ||
+    (s.engine.provider === "api" && !s.engine.keyConfigured) ||
     props.store.busy() ||
     (f.mode === "img2img" && (f.uploading || !f.sourceImage)),
 );
@@ -30,7 +50,18 @@ function randomSeed() {
 }
 </script>
 <template>
-  <aside class="control-panel panel">
+  <aside
+    class="control-panel panel"
+    :class="{ 'is-file-dragging': draggingFiles }"
+    @dragenter="fileDrop.enter"
+    @dragover="fileDrop.over"
+    @dragleave="fileDrop.leave"
+    @drop="fileDrop.drop"
+  >
+    <div v-if="draggingFiles" class="form-file-drop" role="status">
+      <AppIcon name="upload" /><strong>松开即可上传参考图</strong>
+      <span>PNG / JPEG / WebP · ≤10MB</span>
+    </div>
     <div class="panel-heading">
       <div>
         <h1>生成图片</h1>
@@ -70,6 +101,7 @@ function randomSeed() {
           accept="image/png,image/jpeg,image/webp"
           @change="file"
         />
+        <p class="image-note">也可以将本地图片拖到这里上传。</p>
         <div
           id="sourcePreview"
           class="source-preview"
@@ -96,7 +128,11 @@ function randomSeed() {
           {{ f.uploadStatus }}
         </p>
         <p class="image-note">
-          描述要修改和保留的内容。原图按所选比例居中裁切。
+          {{
+            s.engine.provider === "api"
+              ? "描述要修改和保留的内容。参考图将发送给所选 API 服务。"
+              : "描述要修改和保留的内容。原图按所选比例居中裁切。"
+          }}
         </p>
       </section>
       <label class="field-label" for="prompt">提示词 <span>必填</span></label>
@@ -125,13 +161,17 @@ function randomSeed() {
           placeholder="例如：文字、水印、模糊"
         ></textarea>
         <p class="image-note">
-          填写后启用增强引导，生成时间和显存占用可能增加。
+          {{
+            s.engine.provider === "api"
+              ? "作为「请避免以下内容」补充到提示词中。"
+              : "填写后启用增强引导，生成时间和显存占用可能增加。"
+          }}
         </p>
       </details>
       <section class="option-section">
         <div class="section-label-row">
           <label class="field-label">画面比例</label
-          ><span id="ratioHint">{{ s.config.ratios[f.ratio].hint }}</span>
+          ><span id="ratioHint">{{ config.ratios[f.ratio].hint }}</span>
         </div>
         <div
           id="ratioOptions"
@@ -140,7 +180,7 @@ function randomSeed() {
           aria-label="画面比例"
         >
           <button
-            v-for="ratio in ['9:16', '1:1', '16:9', '4:3', '3:4', '3:2']"
+            v-for="ratio in Object.keys(config.ratios)"
             :key="ratio"
             type="button"
             class="choice-card"
@@ -155,16 +195,14 @@ function randomSeed() {
               :class="'ratio-' + ratio.replace(':', '')"
             ></span
             ><strong>{{ ratio }}</strong
-            ><small>{{ s.config.ratios[ratio].label }}</small>
+            ><small>{{ config.ratios[ratio].label }}</small>
           </button>
         </div>
       </section>
       <section class="option-section quality-section">
         <div class="section-label-row">
           <label class="field-label">输出质量</label
-          ><span id="qualityHint">{{
-            s.config.qualities[f.quality].hint
-          }}</span>
+          ><span id="qualityHint">{{ config.qualities[f.quality].hint }}</span>
         </div>
         <div
           id="qualityOptions"
@@ -173,7 +211,7 @@ function randomSeed() {
           aria-label="输出质量"
         >
           <button
-            v-for="(quality, key) in s.config.qualities"
+            v-for="(quality, key) in config.qualities"
             :key="key"
             type="button"
             class="quality-card"
@@ -184,17 +222,26 @@ function randomSeed() {
             @click="f.quality = key"
           >
             <strong>{{ quality.label }}</strong
-            ><span>{{ key === "4K" ? "生成后超分" : "原生生成" }}</span
+            ><span>{{
+              s.engine.provider === "local" && key === "4K"
+                ? "生成后超分"
+                : "原生生成"
+            }}</span
             ><i>{{
-              key === "1K"
-                ? "1024 px"
-                : key === "2K"
-                  ? "约 1.5–1.7K"
-                  : "最长边 3840–4096"
+              s.engine.provider === "api"
+                ? config.ratios[f.ratio][key].join(" × ")
+                : key === "1K"
+                  ? "1024 px"
+                  : key === "2K"
+                    ? "约 1.5–1.7K"
+                    : "最长边 3840–4096"
             }}</i>
           </button>
         </div>
       </section>
+      <p v-if="s.engine.provider === 'api'" class="image-note">
+        {{ config.note }}
+      </p>
       <div class="output-summary">
         <div class="summary-icon"><AppIcon name="image" /></div>
         <div>
@@ -205,10 +252,10 @@ function randomSeed() {
           >
         </div>
         <span id="summaryTag" class="summary-tag"
-          >{{ f.ratio }} · {{ s.config.qualities[f.quality].label }}</span
+          >{{ f.ratio }} · {{ config.qualities[f.quality].label }}</span
         >
       </div>
-      <div class="seed-row">
+      <div v-if="s.engine.provider === 'local'" class="seed-row">
         <label class="field-label" for="seed">随机种子</label>
         <div class="seed-input-wrap">
           <input
@@ -241,6 +288,13 @@ function randomSeed() {
         </div>
       </div>
       <div class="generate-sticky">
+        <p v-if="s.engine.provider === 'api'" class="image-note">
+          {{
+            s.engine.keyConfigured
+              ? "图片由 API 服务生成，费用以该服务账单为准。"
+              : "请先打开 API 配置，填写地址和密钥。"
+          }}
+        </p>
         <button
           id="generateButton"
           class="generate-button"
