@@ -1104,6 +1104,17 @@ watch(
   },
   { immediate: true },
 );
+watch(
+  () => [s.boardOpen, s.canvasFocusId],
+  async ([open, id]) => {
+    if (!open || !id) return;
+    await nextTick();
+    if (!s.boardOpen || s.canvasFocusId !== id) return;
+    const node = nodeMap.value.get(id);
+    if (node) focusLibraryNode(node);
+    s.canvasFocusId = null;
+  },
+);
 onMounted(() => {
   document.addEventListener("keydown", key);
   resizeObserver = new ResizeObserver((entries) => {

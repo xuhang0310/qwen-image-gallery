@@ -12,7 +12,7 @@
     "format": "prettier --write src lib shared server.js vite.config.mjs package.json README.md index.html",
     "format:check": "prettier --check src lib shared server.js vite.config.mjs package.json README.md index.html",
     "test:image": "node --test tests/image-edit.test.cjs",
-    "test:workspace": "node --test tests/workspace.test.cjs"
+    "test:workspace": "node --test tests/workspace.test.cjs tests/media-library.test.cjs"
   },
   "dependencies": {
     "express": "^5.1.0",

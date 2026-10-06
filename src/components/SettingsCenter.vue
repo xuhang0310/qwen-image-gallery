@@ -32,7 +32,9 @@ const tabs = [
             ? "画布"
             : s.settingsReturn === "projects"
               ? "项目中心"
-              : "工作台"
+              : s.settingsReturn === "library"
+                ? "素材库"
+                : "工作台"
         }}
       </button>
     </div>

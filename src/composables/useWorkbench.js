@@ -7,6 +7,7 @@ import {
   syncImageEdit,
 } from "../../shared/image-edit.mjs";
 import apiProfile from "../../shared/api-image.json";
+import { mediaLibrary, assetOnBoard } from "../../shared/media-library.mjs";
 import {
   imageProfile,
   imageModels,
@@ -18,6 +19,7 @@ import {
   normalizeJob,
   normalizeVideoJob,
   normalizeBoard,
+  safeImageUrl,
   sourceUrl,
   request,
   jsonOptions,
@@ -57,6 +59,9 @@ export function useWorkbench() {
     videoJobs: [],
     videoEngine: { ready: false, checking: true },
     hiddenJobIds: [],
+    libraryLoading: false,
+    libraryError: "",
+    canvasFocusId: null,
     board: normalizeBoard(),
     canUndoBoardClear: false,
     selectedJobId: null,
@@ -70,7 +75,7 @@ export function useWorkbench() {
     currentProject: { id: navigation.projectId || "default", name: "默认项目" },
     projects: [],
     projectBusy: false,
-    view: ["workbench", "projects", "canvas", "settings"].includes(
+    view: ["workbench", "projects", "library", "canvas", "settings"].includes(
       navigation.view,
     )
       ? navigation.view
@@ -81,7 +86,7 @@ export function useWorkbench() {
       ? navigation.settingsTab
       : "generation",
     settingsProvider: null,
-    settingsReturn: ["workbench", "projects", "canvas"].includes(
+    settingsReturn: ["workbench", "projects", "library", "canvas"].includes(
       navigation.settingsReturn,
     )
       ? navigation.settingsReturn
@@ -109,6 +114,7 @@ export function useWorkbench() {
     },
   });
   const polls = new Map();
+  const assets = computed(() => mediaLibrary(s.jobs, s.videoJobs));
   const modelConfigs = computed(() => ({
     local: { ...s.config, provider: "local", model: "Qwen Image 2.1" },
     ...Object.fromEntries(
@@ -288,7 +294,9 @@ export function useWorkbench() {
   );
   function navigate(view) {
     if (
-      !["workbench", "projects", "canvas", "settings"].includes(view) ||
+      !["workbench", "projects", "library", "canvas", "settings"].includes(
+        view,
+      ) ||
       s.projectBusy
     )
       return;
@@ -297,6 +305,53 @@ export function useWorkbench() {
     s.view = view;
     if (view === "projects")
       void refreshProjects().catch((error) => toast(error.message));
+    if (view === "library" && s.ready) void refreshLibrary();
+  }
+  async function refreshLibrary() {
+    if (s.libraryLoading) return;
+    s.libraryLoading = true;
+    s.libraryError = "";
+    try {
+      const [images, videos] = await Promise.all([
+        request("/api/jobs"),
+        request("/api/videos/jobs"),
+      ]);
+      if (disposed) return;
+      const merge = (current, latest, normalize) => {
+        const map = new Map(current.map((job) => [job.id, job]));
+        for (const value of latest) {
+          const job = normalize(value);
+          if (!job) continue;
+          const existing = map.get(job.id);
+          if (existing) Object.assign(existing, job);
+          else map.set(job.id, job);
+        }
+        return [...map.values()].sort((a, b) => b.createdAt - a.createdAt);
+      };
+      s.jobs = merge(s.jobs, images.jobs || [], normalizeJob);
+      s.videoJobs = merge(s.videoJobs, videos.jobs || [], normalizeVideoJob);
+      for (const job of [...s.jobs, ...s.videoJobs]) {
+        syncNode(job);
+        if (pending(job)) {
+          if (job.mediaType === "video") pollVideo(job.id);
+          else pollJob(job.id);
+        }
+      }
+    } catch (error) {
+      s.libraryError = "素材加载失败：" + error.message;
+    } finally {
+      s.libraryLoading = false;
+    }
+  }
+  function placeAsset(asset) {
+    if (!s.ready || s.projectBusy) return;
+    const existing = assetOnBoard(asset, s.board.nodes);
+    const node =
+      asset.mediaType === "video" ? addVideo(asset) : addImage(asset);
+    if (!node) return;
+    s.canvasFocusId = node.id;
+    navigate("canvas");
+    toast(existing ? "已定位到画布中的节点" : "已放入当前项目画布");
   }
   function openSettings(tab = "generation", provider = s.engine.provider) {
     s.settingsTab = tab;
@@ -348,6 +403,7 @@ export function useWorkbench() {
       s.ready = false;
       clearedBoard = null;
       s.canUndoBoardClear = false;
+      s.canvasFocusId = null;
       s.currentProject = { id: project.id, name: project.name };
       s.revision = project.revision;
       s.board = restoreNodeEngines(normalizeBoard(project.board));
@@ -502,7 +558,11 @@ export function useWorkbench() {
     for (const node of s.board.nodes.filter(
       (n) => n.jobId === job.id || n.imageEdit?.jobId === job.id,
     )) {
-      if (syncImageEdit(node, job)) continue;
+      if (syncImageEdit(node, job)) {
+        if (job.status === "completed" && job.imageUrl && node.jobId === job.id)
+          node.assetIndex = 0;
+        continue;
+      }
       node.jobStatus = job.status;
       node.provider = job.provider || "local";
       node.model = job.model;
@@ -532,15 +592,19 @@ export function useWorkbench() {
           });
         continue;
       }
-      if (job.status === "completed" && job.imageUrl)
+      if (job.status === "completed" && job.imageUrl) {
+        const output = job.imageUrls?.[node.assetIndex || 0];
+        const url = safeImageUrl(output?.url) ? output.url : job.imageUrl;
         Object.assign(node, {
           status: "done",
-          url: job.imageUrl,
-          thumbnailUrl: job.thumbnailUrl,
+          url,
+          thumbnailUrl: safeImageUrl(output?.thumbnailUrl)
+            ? output.thumbnailUrl
+            : url + "&thumbnail=1",
           width: job.finalWidth || job.width,
           height: job.finalHeight || job.height,
         });
-      else if (["failed", "cancelled"].includes(job.status))
+      } else if (["failed", "cancelled"].includes(job.status))
         Object.assign(node, {
           status: "failed",
           error: job.error || "任务已结束",
@@ -771,8 +835,7 @@ export function useWorkbench() {
       for (const job of [...(restored.jobs || []), ...(data.jobs || [])]
         .map(normalizeJob)
         .filter(Boolean))
-        if (!s.hiddenJobIds.includes(job.id) || pending(job))
-          map.set(job.id, job);
+        map.set(job.id, job);
       s.jobs = [...map.values()].sort((a, b) => b.createdAt - a.createdAt);
       s.videoJobs = [
         ...new Map(
@@ -785,6 +848,7 @@ export function useWorkbench() {
       s.board = normalizeBoard(restored.board);
       s.saved = "saved";
     } catch (error) {
+      s.libraryError = "素材加载失败：" + error.message;
       s.jobs = (localBackup?.jobs || legacyJobs)
         .map(normalizeJob)
         .filter(Boolean);
@@ -812,7 +876,11 @@ export function useWorkbench() {
           error: "上次提交已中断，请重新生成",
         });
     }
-    s.selectedJobId = s.jobs.find(pending)?.id || s.jobs[0]?.id || null;
+    const visibleJobs = s.jobs.filter(
+      (job) => !s.hiddenJobIds.includes(job.id),
+    );
+    s.selectedJobId =
+      visibleJobs.find(pending)?.id || visibleJobs[0]?.id || null;
     for (const job of s.jobs.filter(pending)) pollJob(job.id);
     for (const job of s.videoJobs.filter(pending)) pollVideo(job.id);
     checkVideoEngine();
@@ -965,11 +1033,8 @@ export function useWorkbench() {
   }
   function deleteJob(id) {
     const job = s.jobs.find((j) => j.id === id);
-    // Hidden pending tasks keep their independent polling and recover on reload.
-    if (!pending(job)) {
-      stopPoll(id);
-      s.jobs = s.jobs.filter((j) => j.id !== id);
-    }
+    // Removing a history entry does not remove its generated assets.
+    if (!pending(job)) stopPoll(id);
     s.hiddenJobIds = [...new Set([...s.hiddenJobIds, id])];
     if (s.selectedJobId === id) s.selectedJobId = null;
     if (job && pending(job))
@@ -1009,7 +1074,10 @@ export function useWorkbench() {
     toast("已清除结束的记录，正在执行的任务保留");
   }
   function addImage(job, position = null) {
-    const existing = s.board.nodes.find((n) => n.jobId === job.id);
+    const existing = assetOnBoard(
+      { ...job, mediaType: "image" },
+      s.board.nodes,
+    );
     if (existing) return existing;
     position ||= availablePosition(
       s.board.nodes,
@@ -1021,6 +1089,7 @@ export function useWorkbench() {
     const node = {
       id: crypto.randomUUID(),
       jobId: job.id,
+      assetIndex: job.assetIndex || 0,
       status: "done",
       x: position.x,
       y: position.y,
@@ -1139,6 +1208,9 @@ export function useWorkbench() {
   });
   return {
     s,
+    assets,
+    refreshLibrary,
+    placeAsset,
     initialize,
     busy,
     toast,

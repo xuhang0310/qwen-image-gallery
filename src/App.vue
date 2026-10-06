@@ -6,6 +6,7 @@ import TaskHistory from "./components/TaskHistory.vue";
 import CanvasBoard from "./components/CanvasBoard.vue";
 import PreviewDialog from "./components/PreviewDialog.vue";
 import ProjectsCenter from "./components/ProjectsCenter.vue";
+import MediaLibrary from "./components/MediaLibrary.vue";
 import SettingsCenter from "./components/SettingsCenter.vue";
 import SetupWizard from "./components/SetupWizard.vue";
 import EngineSwitch from "./components/EngineSwitch.vue";
@@ -18,6 +19,7 @@ const importInput = ref(),
 const pages = [
   { id: "workbench", label: "工作台", icon: "home" },
   { id: "projects", label: "项目中心", icon: "folder" },
+  { id: "library", label: "素材库", icon: "library" },
   { id: "canvas", label: "无限画布", icon: "grid" },
 ];
 const pageTitle = computed(
@@ -25,6 +27,7 @@ const pageTitle = computed(
     ({
       workbench: "图像工作台",
       projects: "项目中心",
+      library: "素材库",
       canvas: s.currentProject.name,
       settings: "设置",
     })[s.view],
@@ -197,6 +200,7 @@ onBeforeUnmount(() => document.removeEventListener("keydown", key));
         :store="store"
         @setup-local="setup"
       />
+      <MediaLibrary v-if="s.view === 'library'" :store="store" />
       <CanvasBoard :store="store" @configure-engine="configure" />
     </div>
     <input

@@ -8,6 +8,7 @@ const paths = {
   arrow: "M4 12h16m-6-6 6 6-6 6",
   chevron: "m7 10 5 5 5-5",
   image: "M4 4h16v16H4zM4 16l5-5 4 4 3-3 4 4M8 8h.01",
+  library: "M7 3h14v14M3 7h14v14H3zM3 17l5-5 4 4 2-2 3 3M7 11h.01",
   grid: "M4 4h6v6H4zM14 4h6v6h-6zM4 14h6v6H4zM14 14h6v6h-6z",
   refresh:
     "M20 7v5h-5M4 17v-5h5M6 7a7 7 0 0 1 12-1l2 6M4 12l2 6a7 7 0 0 0 12-1",
