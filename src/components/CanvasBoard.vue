@@ -1,6 +1,5 @@
 <script setup>
 import EngineSwitch from "./EngineSwitch.vue";
-import VideoPromptAISettings from "./VideoPromptAISettings.vue";
 import { useFileDrop, hasFiles } from "../composables/useFileDrop";
 import { imageFileError } from "../image-upload";
 import { beginImageEdit, failImageEdit } from "../../shared/image-edit.mjs";
@@ -43,7 +42,6 @@ const viewport = ref(),
   closeButton = ref(),
   editComposer = ref();
 const selected = ref(null),
-  promptSettingsOpen = ref(false),
   selectedEdge = ref(null),
   edit = ref(null),
   menu = ref(null),
@@ -149,6 +147,45 @@ function center() {
 function select(id) {
   selected.value = id;
   selectedEdge.value = null;
+}
+function focusLibraryNode(node) {
+  select(node.id);
+  const rect = viewport.value?.getBoundingClientRect();
+  if (!rect?.width || !rect.height) return;
+  const railWidth =
+    document.querySelector("#boardRail")?.getBoundingClientRect().width || 240;
+  const usableWidth = Math.max(200, rect.width - railWidth - 32);
+  const width = nodeWidth(node),
+    nodeH = height(node);
+  const zoom = Math.max(
+    0.1,
+    Math.min(
+      board.value.zoom,
+      1,
+      (usableWidth - 48) / width,
+      (rect.height - 80) / nodeH,
+    ),
+  );
+  board.value.zoom = zoom;
+  board.value.pan = {
+    x: usableWidth / 2 - (node.x + width / 2) * zoom,
+    y: rect.height / 2 - (node.y + nodeH / 2) * zoom,
+  };
+}
+async function placeLibrary(job, position = null) {
+  if (!s.ready || s.projectBusy) return;
+  const alreadyAdded = board.value.nodes.some((n) => n.jobId === job.id);
+  const point = position || center();
+  const node =
+    job.mediaType === "video"
+      ? props.store.addVideo(job, point)
+      : props.store.addImage(job, point);
+  if (!node) return;
+  await nextTick();
+  focusLibraryNode(node);
+  props.store.toast(
+    alreadyAdded ? "已定位到画布中的节点" : "已放入当前项目画布",
+  );
 }
 async function focusVideoPrompt(node) {
   await nextTick();
@@ -548,7 +585,7 @@ function action(name, node, detail) {
       (e) => !(e.to === node.id && e.from === detail),
     );
   if (name === "upload-video-references") uploadVideoReferences(node, detail);
-  if (name === "configure-prompt-ai") promptSettingsOpen.value = true;
+  if (name === "configure-prompt-ai") props.store.openSettings("prompt-ai");
   if (name === "expand-video-prompt") updateVideoPrompt(node, true);
   if (name === "check-video") props.store.checkVideoEngine();
   if (name === "cancel-video") {
@@ -948,7 +985,7 @@ function submitEdit() {
 }
 function close() {
   fileDrop.reset();
-  s.boardOpen = false;
+  props.store.navigate("projects");
   edit.value = false;
   menu.value = null;
   props.store.flush();
@@ -965,12 +1002,12 @@ function drop(event) {
     (j) => j.id === event.dataTransfer.getData("text/plain"),
   );
   if (video) {
-    props.store.addVideo(video, worldPoint(event.clientX, event.clientY));
+    void placeLibrary(video, worldPoint(event.clientX, event.clientY));
     return;
   }
   if (job?.imageUrl) {
     const p = worldPoint(event.clientX, event.clientY);
-    props.store.addImage(job, { x: p.x - 110, y: p.y - 100 });
+    void placeLibrary(job, { x: p.x - 110, y: p.y - 100 });
   }
 }
 function dropFiles(files, event) {
@@ -1065,6 +1102,7 @@ watch(
       closeButton.value?.focus();
     } else document.querySelector("#openBoard")?.focus();
   },
+  { immediate: true },
 );
 onMounted(() => {
   document.addEventListener("keydown", key);
@@ -1076,6 +1114,16 @@ onMounted(() => {
   });
   resizeObserver.observe(viewport.value);
 });
+watch(
+  () => s.currentProject.id,
+  () => {
+    selected.value = null;
+    selectedEdge.value = null;
+    edit.value = null;
+    menu.value = null;
+    sizes.clear();
+  },
+);
 onBeforeUnmount(() => {
   document.removeEventListener("keydown", key);
   resizeObserver?.disconnect();
@@ -1083,21 +1131,17 @@ onBeforeUnmount(() => {
 });
 </script>
 <template>
-  <VideoPromptAISettings
-    :open="promptSettingsOpen"
-    @close="promptSettingsOpen = false"
-  />
   <div
     id="boardOverlay"
     class="board-overlay"
     :class="{ hidden: !s.boardOpen }"
-    role="dialog"
-    aria-modal="true"
+    role="region"
     aria-label="无限画布"
   >
     <div class="board-topbar">
       <div class="board-title">
         <AppIcon name="grid" /><strong>节点画布</strong
+        ><strong class="canvas-project-name">{{ s.currentProject.name }}</strong
         ><span id="boardStats" class="board-stats"
           >{{ board.nodes.length }} 个节点 ·
           {{ board.edges.length }} 条连线</span
@@ -1315,13 +1359,14 @@ onBeforeUnmount(() => {
               ><button
                 class="board-rail-add"
                 :data-add-id="job.id"
-                @click="
-                  job.mediaType === 'video'
-                    ? store.addVideo(job, center())
-                    : store.addImage(job, center())
-                "
+                :disabled="!s.ready || s.projectBusy"
+                @click="placeLibrary(job)"
               >
-                放入画布
+                {{
+                  board.nodes.some((n) => n.jobId === job.id)
+                    ? "定位节点"
+                    : "放入画布"
+                }}
               </button>
             </div>
           </div>

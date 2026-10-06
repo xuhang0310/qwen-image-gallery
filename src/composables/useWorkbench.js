@@ -26,6 +26,7 @@ import {
 const JOB_KEY = "qwen-image-gallery-jobs-v1";
 const BOARD_KEY = "qwen-image-gallery-board-v1";
 const BACKUP_KEY = "qwen-image-gallery-project-v2";
+const NAV_KEY = "qwen-image-gallery-navigation-v1";
 const read = (key, fallback) => {
   try {
     return JSON.parse(localStorage.getItem(key)) || fallback;
@@ -40,6 +41,7 @@ const normalizeEngine = (engine) => ({
 });
 
 export function useWorkbench() {
+  const navigation = read(NAV_KEY, {});
   const s = reactive({
     ready: false,
     config: structuredClone(defaults),
@@ -65,8 +67,33 @@ export function useWorkbench() {
     saved: "loading",
     saveError: "",
     revision: 0,
+    currentProject: { id: navigation.projectId || "default", name: "默认项目" },
+    projects: [],
+    projectBusy: false,
+    view: ["workbench", "projects", "canvas", "settings"].includes(
+      navigation.view,
+    )
+      ? navigation.view
+      : "workbench",
+    settingsTab: ["generation", "prompt-ai", "storage"].includes(
+      navigation.settingsTab,
+    )
+      ? navigation.settingsTab
+      : "generation",
+    settingsProvider: null,
+    settingsReturn: ["workbench", "projects", "canvas"].includes(
+      navigation.settingsReturn,
+    )
+      ? navigation.settingsReturn
+      : "workbench",
     toast: "",
-    boardOpen: false,
+    get boardOpen() {
+      return this.view === "canvas";
+    },
+    set boardOpen(open) {
+      if (open) this.view = "canvas";
+      else if (this.view === "canvas") this.view = "workbench";
+    },
     preview: null,
     form: {
       prompt: "",
@@ -160,6 +187,7 @@ export function useWorkbench() {
   const snapshot = () =>
     JSON.parse(
       JSON.stringify({
+        projectId: s.currentProject.id,
         jobs: s.jobs,
         videoJobs: s.videoJobs,
         board: s.board,
@@ -167,12 +195,7 @@ export function useWorkbench() {
       }),
     );
   // Only a submission from the main form locks that form briefly.
-  const busy = () => s.submitting || s.switching;
-  const hasActiveJobs = () =>
-    s.inFlight > 0 ||
-    s.preparing > 0 ||
-    s.jobs.some(pending) ||
-    s.videoJobs.some(pending);
+  const busy = () => s.submitting || s.switching || s.projectBusy;
   function toast(message) {
     s.toast = message;
     clearTimeout(toastTimer);
@@ -181,7 +204,7 @@ export function useWorkbench() {
   function backup() {
     try {
       localStorage.setItem(
-        BACKUP_KEY,
+        BACKUP_KEY + ":" + s.currentProject.id,
         JSON.stringify({
           ...snapshot(),
           dirty: dirty || savingCount > 0,
@@ -213,6 +236,7 @@ export function useWorkbench() {
           jsonOptions({ ...data, revision: s.revision }, "PUT"),
         );
         s.revision = result.revision;
+        updateProjectSummary();
         s.saved = dirty || savingCount > 1 ? "saving" : "saved";
         s.saveError = "";
       } catch (error) {
@@ -239,6 +263,178 @@ export function useWorkbench() {
       backup();
       flush();
     }, 300);
+  }
+  function rememberNavigation() {
+    try {
+      localStorage.setItem(
+        NAV_KEY,
+        JSON.stringify({
+          view: s.view,
+          projectId: s.currentProject.id,
+          settingsTab: s.settingsTab,
+          settingsReturn: s.settingsReturn,
+        }),
+      );
+    } catch {
+      /* Navigation is still usable without browser storage. */
+    }
+  }
+  watch(
+    () => [s.view, s.currentProject.id, s.settingsTab, s.settingsReturn],
+    rememberNavigation,
+    {
+      flush: "sync",
+    },
+  );
+  function navigate(view) {
+    if (
+      !["workbench", "projects", "canvas", "settings"].includes(view) ||
+      s.projectBusy
+    )
+      return;
+    if (view === "settings" && s.view !== "settings") s.settingsReturn = s.view;
+    s.preview = null;
+    s.view = view;
+    if (view === "projects")
+      void refreshProjects().catch((error) => toast(error.message));
+  }
+  function openSettings(tab = "generation", provider = s.engine.provider) {
+    s.settingsTab = tab;
+    s.settingsProvider = provider;
+    navigate("settings");
+  }
+  function updateProjectSummary() {
+    const current = s.projects.find((p) => p.id === s.currentProject.id);
+    if (current)
+      Object.assign(current, {
+        revision: s.revision,
+        updatedAt: Date.now(),
+        nodeCount: s.board.nodes.length,
+        imageCount: s.board.nodes.filter(
+          (n) => n.status === "done" && n.kind !== "video",
+        ).length,
+        videoCount: s.board.nodes.filter((n) => n.kind === "video").length,
+        coverUrl:
+          s.board.nodes.find(
+            (n) => n.status === "done" && n.kind !== "video" && n.url,
+          )?.thumbnailUrl ||
+          s.board.nodes.find(
+            (n) => n.status === "done" && n.kind !== "video" && n.url,
+          )?.url ||
+          null,
+      });
+  }
+  async function refreshProjects() {
+    const data = await request("/api/projects");
+    s.projects = data.projects;
+    return data;
+  }
+  async function openProject(id, view = "canvas") {
+    if (s.projectBusy) return false;
+    if (s.inFlight || s.preparing) {
+      toast("请等待当前提交完成后再切换项目");
+      return false;
+    }
+    s.projectBusy = true;
+    try {
+      await flush();
+      if (s.saved === "error")
+        throw new Error("当前画布尚未保存，请先重试保存后切换项目");
+      const project = await request("/api/projects/" + encodeURIComponent(id));
+      await request(
+        "/api/projects/" + encodeURIComponent(id) + "/activate",
+        jsonOptions({}),
+      );
+      s.ready = false;
+      clearedBoard = null;
+      s.canUndoBoardClear = false;
+      s.currentProject = { id: project.id, name: project.name };
+      s.revision = project.revision;
+      s.board = restoreNodeEngines(normalizeBoard(project.board));
+      s.hiddenJobIds = project.hiddenJobIds || [];
+      s.jobs = [
+        ...new Map(
+          [
+            ...(project.jobs || []).map(normalizeJob).filter(Boolean),
+            ...s.jobs,
+          ].map((j) => [j.id, j]),
+        ).values(),
+      ].sort((a, b) => b.createdAt - a.createdAt);
+      s.videoJobs = [
+        ...new Map(
+          [
+            ...(project.videoJobs || []).map(normalizeVideoJob).filter(Boolean),
+            ...s.videoJobs,
+          ].map((j) => [j.id, j]),
+        ).values(),
+      ].sort((a, b) => b.createdAt - a.createdAt);
+      for (const job of [...s.jobs, ...s.videoJobs]) syncNode(job);
+      for (const job of s.jobs.filter(pending)) pollJob(job.id);
+      for (const job of s.videoJobs.filter(pending)) pollVideo(job.id);
+      s.ready = true;
+      dirty = false;
+      blockedSave = false;
+      s.saved = "saved";
+      s.saveError = "";
+      s.view = view;
+      backup();
+      return true;
+    } catch (error) {
+      toast(error.message);
+      return false;
+    } finally {
+      s.projectBusy = false;
+    }
+  }
+  async function createProject(name) {
+    if (s.projectBusy || s.inFlight || s.preparing) {
+      toast("请等待当前提交完成后再创建项目");
+      return false;
+    }
+    try {
+      await flush();
+      if (s.saved === "error")
+        throw new Error("当前画布尚未保存，请先重试保存");
+      const project = await request("/api/projects", jsonOptions({ name }));
+      await refreshProjects();
+      return await openProject(project.id);
+    } catch (error) {
+      toast(error.message);
+      return false;
+    }
+  }
+  async function renameProject(id, name) {
+    try {
+      const project = await request(
+        "/api/projects/" + encodeURIComponent(id),
+        jsonOptions({ name }, "PATCH"),
+      );
+      if (id === s.currentProject.id) s.currentProject.name = project.name;
+      await refreshProjects();
+      return true;
+    } catch (error) {
+      toast(error.message);
+      return false;
+    }
+  }
+  async function deleteProject(id) {
+    if (s.projectBusy || s.inFlight || s.preparing) return false;
+    try {
+      if (id === s.currentProject.id) {
+        const next = s.projects.find((p) => p.id !== id);
+        if (!next) throw new Error("请至少保留一个项目");
+        if (!(await openProject(next.id, "projects"))) return false;
+      }
+      await request("/api/projects/" + encodeURIComponent(id), {
+        method: "DELETE",
+      });
+      await refreshProjects();
+      toast("项目已删除，素材文件和生成记录保留");
+      return true;
+    } catch (error) {
+      toast(error.message);
+      return false;
+    }
   }
   watch(
     () => s.board,
@@ -401,10 +597,15 @@ export function useWorkbench() {
     tick();
   }
   async function prepareVideo(parameters) {
-    return request("/api/videos/prepare", {
-      ...jsonOptions(parameters),
-      signal: AbortSignal.timeout(150000),
-    });
+    s.preparing++;
+    try {
+      return await request("/api/videos/prepare", {
+        ...jsonOptions(parameters),
+        signal: AbortSignal.timeout(150000),
+      });
+    } finally {
+      s.preparing--;
+    }
   }
   async function generateVideo(parameters, node) {
     s.inFlight++;
@@ -486,6 +687,8 @@ export function useWorkbench() {
           )
         )
           throw new Error("任务状态暂时不可用");
+        if (data.imageSaveError && !job.imageSaveError)
+          toast(data.imageSaveError);
         Object.assign(
           job,
           Object.fromEntries(
@@ -495,6 +698,8 @@ export function useWorkbench() {
               dimensions: data.dimensions,
               usage: data.usage,
               apiResult: data.apiResult,
+              savedImages: data.savedImages,
+              imageSaveError: data.imageSaveError,
               completedAt: data.completedAt,
               ...data.dimensions,
               seed: data.seed,
@@ -531,14 +736,25 @@ export function useWorkbench() {
     const legacyJobs =
       read(JOB_KEY, []).map?.(normalizeJob).filter(Boolean) || [];
     const legacyBoard = normalizeBoard(read(BOARD_KEY, {}));
-    const localBackup = read(BACKUP_KEY, null);
+    let localBackup =
+      read(BACKUP_KEY + ":" + s.currentProject.id, null) ||
+      (s.currentProject.id === "default" ? read(BACKUP_KEY, null) : null);
     try {
-      const [project, data, config, videos] = await Promise.all([
-        request("/api/project"),
+      const [collection, data, config, videos] = await Promise.all([
+        request("/api/projects"),
         request("/api/jobs"),
         request("/api/config"),
         request("/api/videos/jobs"),
       ]);
+      s.projects = collection.projects;
+      const id = collection.projects.some((p) => p.id === navigation.projectId)
+        ? navigation.projectId
+        : collection.activeProjectId;
+      const project = await request("/api/projects/" + encodeURIComponent(id));
+      s.currentProject = { id: project.id, name: project.name };
+      localBackup =
+        read(BACKUP_KEY + ":" + id, null) ||
+        (id === "default" ? read(BACKUP_KEY, null) : null);
       Object.assign(s.config, config);
       if (config.engine) s.engine = normalizeEngine(config.engine);
       s.revision = project.revision;
@@ -546,7 +762,9 @@ export function useWorkbench() {
         ? localBackup
         : project.revision
           ? project
-          : { jobs: legacyJobs, board: legacyBoard, hiddenJobIds: [] };
+          : id === "default"
+            ? { jobs: legacyJobs, board: legacyBoard, hiddenJobIds: [] }
+            : project;
       s.hiddenJobIds = restored.hiddenJobIds || [];
       const map = new Map();
       // Database results are authoritative; browser snapshots carry legacy jobs.
@@ -837,7 +1055,12 @@ export function useWorkbench() {
   }
   function exportProject() {
     const content = JSON.stringify(
-      { format: "qwen-workbench", version: 2, ...snapshot() },
+      {
+        format: "qwen-workbench",
+        version: 2,
+        name: s.currentProject.name,
+        ...snapshot(),
+      },
       null,
       2,
     );
@@ -846,7 +1069,8 @@ export function useWorkbench() {
     );
     const link = document.createElement("a");
     link.href = url;
-    link.download = "qwen-project.json";
+    link.download =
+      s.currentProject.name.replace(/[<>:"/\\|?*]/g, "_") + ".json";
     link.click();
     setTimeout(() => URL.revokeObjectURL(url), 1000);
   }
@@ -864,7 +1088,8 @@ export function useWorkbench() {
         !Array.isArray(data.board.edges)
       )
         throw new Error("请选择有效的 Qwen 项目文件");
-      if (hasActiveJobs()) throw new Error("请等待当前任务结束后再导入项目");
+      if (s.inFlight || s.preparing)
+        throw new Error("请等待当前提交完成后再导入项目");
       const jobs = data.jobs.map(normalizeJob);
       const videoJobs = (data.videoJobs || []).map(normalizeVideoJob);
       if (videoJobs.some((j) => !j)) throw new Error("项目包含无效的视频记录");
@@ -876,38 +1101,24 @@ export function useWorkbench() {
       )
         throw new Error("项目包含无效的节点或连线");
       await flush();
-      const result = await request(
-        "/api/project",
-        jsonOptions(
-          {
+      if (s.saved === "error")
+        throw new Error("当前画布尚未保存，请先重试保存");
+      const project = await request(
+        "/api/projects",
+        jsonOptions({
+          name: String(
+            data.name || file.name.replace(/\.json$/i, "") || "导入项目",
+          ).slice(0, 80),
+          data: {
             jobs,
             videoJobs,
             board,
             hiddenJobIds: data.hiddenJobIds || [],
-            revision: s.revision,
           },
-          "PUT",
-        ),
+        }),
       );
-      s.ready = false;
-      clearedBoard = null;
-      s.canUndoBoardClear = false;
-      s.revision = result.revision;
-      s.jobs = jobs;
-      s.videoJobs = videoJobs;
-      s.board = board;
-      for (const job of [...jobs, ...videoJobs]) syncNode(job);
-      s.hiddenJobIds = data.hiddenJobIds || [];
-      s.selectedJobId = jobs[0]?.id || null;
-      s.ready = true;
-      blockedSave = false;
-      dirty = false;
-      s.saved = "saved";
-      s.saveError = "";
-      backup();
-      for (const job of jobs.filter(pending)) pollJob(job.id);
-      for (const job of videoJobs.filter(pending)) pollVideo(job.id);
-      toast("项目已导入");
+      await refreshProjects();
+      if (await openProject(project.id)) toast("已导入为新项目");
     } catch (error) {
       toast(error.message);
     }
@@ -960,5 +1171,12 @@ export function useWorkbench() {
     qualityLabel,
     saveEngine,
     switchEngine,
+    navigate,
+    openSettings,
+    refreshProjects,
+    openProject,
+    createProject,
+    renameProject,
+    deleteProject,
   };
 }

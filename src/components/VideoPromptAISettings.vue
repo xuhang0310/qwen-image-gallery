@@ -2,7 +2,7 @@
 import { reactive, ref, watch, nextTick } from "vue";
 import { request, jsonOptions } from "../domain";
 import AppIcon from "./AppIcon.vue";
-const props = defineProps({ open: Boolean });
+const props = defineProps({ open: Boolean, embedded: Boolean });
 const emit = defineEmits(["close"]);
 const form = reactive({
   provider: "reuse",
@@ -12,6 +12,7 @@ const form = reactive({
   removeKey: false,
 });
 const models = ref([]),
+  saved = ref(false),
   busy = ref(false),
   error = ref(""),
   current = ref(null),
@@ -22,6 +23,7 @@ watch(
   () => props.open,
   async (open) => {
     error.value = "";
+    saved.value = false;
     form.apiKey = "";
     form.removeKey = false;
     if (!open) {
@@ -44,6 +46,7 @@ watch(
       closeButton.value?.focus();
     }
   },
+  { immediate: true },
 );
 async function save(close = true) {
   busy.value = true;
@@ -55,7 +58,10 @@ async function save(close = true) {
     );
     form.apiKey = "";
     form.removeKey = false;
-    if (close) emit("close");
+    if (close) {
+      if (props.embedded) saved.value = true;
+      else emit("close");
+    }
     return true;
   } catch (e) {
     error.value = e.message;
@@ -80,6 +86,7 @@ async function loadModels() {
   }
 }
 function key(event) {
+  if (props.embedded) return;
   if (event.key === "Escape") {
     event.preventDefault();
     event.stopPropagation();
@@ -100,19 +107,24 @@ function key(event) {
 }
 </script>
 <template>
-  <Teleport to="body">
+  <Teleport to="body" :disabled="embedded">
     <div
       v-if="open"
       class="api-settings-layer"
+      :class="{ 'settings-embedded': embedded }"
       @keydown="key"
       @pointerdown.stop
     >
-      <div class="api-settings-backdrop" @click="!busy && emit('close')"></div>
+      <div
+        v-if="!embedded"
+        class="api-settings-backdrop"
+        @click="!busy && emit('close')"
+      ></div>
       <section
         ref="panel"
         class="api-settings-panel prompt-ai-settings"
-        role="dialog"
-        aria-modal="true"
+        :role="embedded ? 'region' : 'dialog'"
+        :aria-modal="embedded ? undefined : true"
         aria-labelledby="prompt-ai-settings-title"
         :aria-busy="busy"
       >
@@ -123,6 +135,7 @@ function key(event) {
             <p>简单描述扩写成表演方案，确认卡片后生成视频。</p>
           </div>
           <button
+            v-if="!embedded"
             ref="closeButton"
             type="button"
             class="icon-button"
@@ -133,6 +146,9 @@ function key(event) {
             <AppIcon name="close" />
           </button>
         </header>
+        <p v-if="saved" class="settings-save-success" role="status">
+          写词 AI 配置已保存
+        </p>
         <form @submit.prevent="save(true)">
           <label class="field-label" for="prompt-ai-provider">连接方式</label>
           <select

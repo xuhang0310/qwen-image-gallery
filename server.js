@@ -7,6 +7,7 @@ const sharp = require("sharp");
 const { Readable } = require("node:stream");
 const { pipeline } = require("node:stream/promises");
 const { createStorage } = require("./lib/storage");
+const { createWorkbenchSettings } = require("./lib/workbench-settings");
 const { createSetup, loadRuntime } = require("./lib/setup");
 const { configureNetwork } = require("./lib/network");
 const { createApiImages } = require("./lib/api-images");
@@ -114,10 +115,29 @@ function validSourceImage(image) {
   );
 }
 
+const workbenchSettings = createWorkbenchSettings({ app, dataDir: DATA_DIR });
+async function archiveLocalImages(job) {
+  return workbenchSettings.archive(job, job.images || [], (image) =>
+    withComfy("/view?" + imageQuery(image), {}, async (response) => {
+      if (!response.ok) throw new Error("读取生成图片失败");
+      const chunks = [];
+      let bytes = 0;
+      for await (const chunk of response.body) {
+        bytes += chunk.length;
+        if (bytes > 64 * 1024 * 1024)
+          throw new Error("生成图片超过保存大小限制");
+        chunks.push(chunk);
+      }
+      return Buffer.concat(chunks);
+    }),
+  );
+}
+
 const apiImages = createApiImages({
   app,
   dataDir: DATA_DIR,
   storage,
+  outputSettings: workbenchSettings,
   readComfySource: async (source, signal) => {
     if (!validSourceImage(source)) throw new Error("参考图无效，请重新上传");
     return withComfy(
@@ -380,6 +400,7 @@ const setupService = createSetup({
       seed,
       dimensions,
       createdAt: startedAt,
+      imageOutputDir: workbenchSettings.capture(),
       purpose: "setup-verification",
     };
     storage.put(id, { ...metadata, status: "queued" });
@@ -404,7 +425,11 @@ const setupService = createSetup({
                 "/api/images/view?" + imageQuery(value) + "&thumbnail=1",
               downloadUrl: "/api/images/download?" + imageQuery(value),
             }));
-            storage.put(id, { ...metadata, ...result, imageUrls });
+            const archived = await archiveLocalImages({
+              ...metadata,
+              ...result,
+            });
+            storage.put(id, { ...metadata, ...result, imageUrls, ...archived });
             const info = await withComfy(
               "/view?" + query,
               {},
@@ -689,6 +714,7 @@ app.post("/api/generate", async (req, res) => {
       id: body.prompt_id,
       status: "queued",
       ...metadata,
+      imageOutputDir: workbenchSettings.capture(),
     });
     res.status(202).json({ promptId: body.prompt_id, ...metadata });
   } catch (error) {
@@ -761,6 +787,11 @@ app.get("/api/jobs/:promptId", async (req, res) => {
       }));
     if (metadata && JSON.stringify(result) !== JSON.stringify(metadata))
       storage.put(promptId, { ...result, id: promptId });
+    if (metadata && result.status === "completed" && result.images?.length) {
+      const archived = await archiveLocalImages({ ...result, id: promptId });
+      Object.assign(result, archived);
+      storage.put(promptId, { ...result, id: promptId });
+    }
     res.json(result);
   } catch (error) {
     res.status(502).json({
@@ -802,11 +833,80 @@ app.post("/api/jobs/:promptId/cancel", async (req, res) => {
   }
 });
 
-app.get("/api/project", (_req, res) => res.json(storage.project()));
+app.get("/api/projects", (_req, res) =>
+  res.json({
+    projects: storage.projects(),
+    activeProjectId: storage.activeProjectId(),
+  }),
+);
+function projectName(value) {
+  if (
+    typeof value !== "string" ||
+    !value.trim() ||
+    value.trim().length > 80 ||
+    /[\r\n\0]/.test(value)
+  )
+    throw new Error("项目名称需为 1–80 个字符");
+  return value.trim();
+}
+app.post("/api/projects", (req, res) => {
+  try {
+    const data = req.body.data
+      ? validateProject({ ...req.body.data, revision: 0 })
+      : undefined;
+    const created = storage.createProject(projectName(req.body.name), data);
+    if (data) {
+      videos.restoreJobs(data.videoJobs);
+      for (const job of data.jobs)
+        if (!storage.get(job.id) && !["queued", "running"].includes(job.status))
+          storage.put(job.id, job);
+    }
+    res.status(201).json(created);
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
+});
+app.get("/api/projects/:id", (req, res) => {
+  const project = storage.project(req.params.id);
+  if (!project) return res.status(404).json({ error: "项目不存在" });
+  res.json(project);
+});
+app.post("/api/projects/:id/activate", (req, res) => {
+  if (!storage.activateProject(req.params.id))
+    return res.status(404).json({ error: "项目不存在" });
+  res.json({ activeProjectId: req.params.id });
+});
+app.patch("/api/projects/:id", (req, res) => {
+  try {
+    if (!storage.renameProject(req.params.id, projectName(req.body.name)))
+      return res.status(404).json({ error: "项目不存在" });
+    res.json(storage.projects().find((p) => p.id === req.params.id));
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
+});
+app.delete("/api/projects/:id", (req, res) => {
+  try {
+    if (!storage.deleteProject(req.params.id))
+      return res.status(404).json({ error: "项目不存在" });
+    res.json({
+      projects: storage.projects(),
+      activeProjectId: storage.activeProjectId(),
+    });
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
+});
+app.get("/api/project", (_req, res) =>
+  res.json(storage.project("default") || storage.project()),
+);
 app.put("/api/project", (req, res) => {
   try {
+    const id = req.body.projectId || "default";
+    if (!storage.project(id))
+      return res.status(404).json({ error: "项目不存在" });
     const project = validateProject(req.body);
-    const revision = storage.saveProject(project, req.body.revision);
+    const revision = storage.saveProject(project, req.body.revision, id);
     if (revision === null)
       return res.status(409).json({
         error: "项目已在另一个窗口更新，请导出当前项目后重新载入",
@@ -860,6 +960,8 @@ function validateProject(value) {
       !(node.kind === "video" ? safeVideoUrl(node.url) : safeImageUrl(node.url))
     )
       throw new Error("媒体地址不正确");
+    if (node.thumbnailUrl && !safeImageUrl(node.thumbnailUrl))
+      throw new Error("缩略图地址不正确");
     if (
       node.kind === "video" &&
       node.downloadUrl &&

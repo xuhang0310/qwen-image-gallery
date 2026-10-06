@@ -162,6 +162,23 @@ function example() {
               : "原生生成"
           }}</span>
         </div>
+        <p
+          v-if="job?.imageSaveError"
+          class="image-storage-status has-error"
+          role="alert"
+        >
+          {{ job.imageSaveError }}
+          <button class="ghost-button" @click="store.openSettings('storage')">
+            检查保存位置
+          </button>
+        </p>
+        <p
+          v-else-if="job?.savedImages?.length"
+          class="image-storage-status"
+          :title="job.savedImages[0].path"
+        >
+          <AppIcon name="folder" />已自动保存到指定文件夹
+        </p>
       </div>
       <div
         id="errorState"

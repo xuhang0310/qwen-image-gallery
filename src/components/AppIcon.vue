@@ -2,6 +2,8 @@
 defineProps({ name: String });
 const paths = {
   video: "M3 5h13v14H3zM16 10l5-3v10l-5-3M8 9l4 3-4 3z",
+  folder: "M3 7h7l2-3h9v16H3zM3 7V4h7l2 3",
+  home: "M3 10l9-7 9 7M5 9v12h14V9M10 21v-7h4v7",
   close: "M6 6l12 12M18 6L6 18",
   arrow: "M4 12h16m-6-6 6 6-6 6",
   chevron: "m7 10 5 5 5-5",

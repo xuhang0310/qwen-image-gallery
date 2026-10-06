@@ -1,73 +1,59 @@
 <script setup>
-import { ref, watch, nextTick, onMounted, onBeforeUnmount } from "vue";
+import { ref, computed, onMounted, onBeforeUnmount } from "vue";
 import GenerationForm from "./components/GenerationForm.vue";
 import ResultPanel from "./components/ResultPanel.vue";
 import TaskHistory from "./components/TaskHistory.vue";
 import CanvasBoard from "./components/CanvasBoard.vue";
 import PreviewDialog from "./components/PreviewDialog.vue";
-import { useWorkbench } from "./composables/useWorkbench";
-import AppIcon from "./components/AppIcon.vue";
+import ProjectsCenter from "./components/ProjectsCenter.vue";
+import SettingsCenter from "./components/SettingsCenter.vue";
 import SetupWizard from "./components/SetupWizard.vue";
 import EngineSwitch from "./components/EngineSwitch.vue";
-import WorkbenchSettings from "./components/WorkbenchSettings.vue";
+import AppIcon from "./components/AppIcon.vue";
+import { useWorkbench } from "./composables/useWorkbench";
 const store = useWorkbench(),
   { s } = store;
-const importInput = ref();
-const setupOpen = ref(false);
-const settingsOpen = ref(false);
-const returningToSettings = ref(false);
-const settingsProvider = ref();
-let settingsFromBoard = false;
-let settingsTrigger;
-const localSetupNeeded = ref(false);
-function needsSetup() {
-  localSetupNeeded.value = true;
-  if (s.ready && s.engine.provider === "local" && !settingsOpen.value)
-    openSetup();
-}
-watch(
-  () => s.ready,
-  (ready) => {
-    if (ready && localSetupNeeded.value && s.engine.provider === "local")
-      openSetup();
-  },
+const importInput = ref(),
+  setupOpen = ref(false);
+const pages = [
+  { id: "workbench", label: "工作台", icon: "home" },
+  { id: "projects", label: "项目中心", icon: "folder" },
+  { id: "canvas", label: "无限画布", icon: "grid" },
+];
+const pageTitle = computed(
+  () =>
+    ({
+      workbench: "图像工作台",
+      projects: "项目中心",
+      canvas: s.currentProject.name,
+      settings: "设置",
+    })[s.view],
 );
-function openSettings(provider = s.engine.provider) {
-  settingsTrigger = document.activeElement;
-  settingsFromBoard = s.boardOpen;
-  settingsProvider.value = provider;
-  s.boardOpen = false;
-  s.preview = null;
-  setupOpen.value = false;
-  settingsOpen.value = true;
+const saveText = computed(() =>
+  s.saved === "saved"
+    ? "已保存到本机"
+    : s.saved === "error"
+      ? s.saveError
+      : s.saved === "loading"
+        ? "正在恢复项目…"
+        : "正在保存…",
+);
+function configure(provider) {
+  store.openSettings("generation", provider);
 }
-function closeSettings() {
-  settingsOpen.value = false;
-  if (settingsFromBoard) s.boardOpen = true;
-  else nextTick(() => settingsTrigger?.focus());
-  settingsFromBoard = false;
-}
-function configureLocal() {
-  returningToSettings.value = true;
-  settingsProvider.value = "local";
-  settingsOpen.value = false;
-  openSetup();
-}
-function closeSetup() {
-  setupOpen.value = false;
-  if (returningToSettings.value) settingsOpen.value = true;
-  returningToSettings.value = false;
-}
-function openSetup() {
-  s.boardOpen = false;
-  s.preview = null;
+function setup() {
+  store.navigate("settings");
+  s.settingsTab = "generation";
   setupOpen.value = true;
+}
+function importFile(event) {
+  void store.importProject(event.target.files[0]);
+  event.target.value = "";
 }
 function key(event) {
   if (
-    !s.boardOpen &&
+    s.view === "workbench" &&
     !setupOpen.value &&
-    !settingsOpen.value &&
     !s.preview &&
     !event.isComposing &&
     (event.ctrlKey || event.metaKey) &&
@@ -84,131 +70,152 @@ onMounted(() => {
 onBeforeUnmount(() => document.removeEventListener("keydown", key));
 </script>
 <template>
-  <div class="app-shell" :inert="setupOpen || settingsOpen">
-    <header class="topbar">
-      <a class="brand" href="/" aria-label="Qwen Image 工作台首页"
-        ><span class="brand-mark"><AppIcon name="image" /></span
-        ><span><strong>Qwen Image</strong><small>图像工作台</small></span></a
+  <div class="studio-layout" :inert="setupOpen">
+    <aside class="studio-sidebar" aria-label="主导航">
+      <button
+        class="studio-brand"
+        aria-label="返回工作台"
+        @click="store.navigate('workbench')"
       >
-      <div class="topbar-meta">
-        <div
-          id="connectionPill"
-          class="connection-pill"
-          :data-state="s.health.state"
+        <span class="brand-mark"><AppIcon name="image" /></span
+        ><span><strong>Qwen Image</strong><small>创作工作室</small></span>
+      </button>
+      <div class="sidebar-label">工作空间</div>
+      <nav class="studio-navigation">
+        <button
+          v-for="page in pages"
+          :key="page.id"
+          :id="'nav-' + page.id"
+          :aria-label="page.label"
+          :title="page.label"
+          :class="{ active: s.view === page.id }"
+          :aria-current="s.view === page.id ? 'page' : undefined"
+          :disabled="s.projectBusy"
+          @click="store.navigate(page.id)"
         >
-          <span class="status-dot"></span
-          ><span id="connectionText">{{
-            s.health.state === "online"
-              ? s.engine.provider === "api"
-                ? "API 已连接"
-                : "ComfyUI 已连接"
-              : s.health.state === "checking"
-                ? s.engine.provider === "api"
-                  ? "正在检查 API"
-                  : "正在连接 ComfyUI"
-                : s.engine.provider === "api"
-                  ? "API 未连接"
-                  : "ComfyUI 未连接"
+          <AppIcon :name="page.icon" /><span>{{ page.label }}</span
+          ><span v-if="page.id === 'projects'" class="nav-count">{{
+            s.projects.length
           }}</span>
-        </div>
-        <span class="topbar-divider"></span
-        ><span id="runtimeText" class="runtime-text">{{
-          s.engine.provider === "api"
-            ? "API 生图"
-            : s.health.state === "online"
-              ? "本地运行"
-              : "等待本地引擎"
-        }}</span
-        ><button class="ghost-button setup-entry" @click="openSettings()">
-          <AppIcon name="settings" />生图配置</button
+        </button>
+      </nav>
+      <div class="sidebar-current">
+        <span class="sidebar-label">当前项目</span
         ><button
-          id="openBoard"
-          class="ghost-button board-entry"
-          title="无限画布"
-          aria-label="打开无限画布"
-          @click="s.boardOpen = true"
+          :disabled="s.projectBusy || !s.ready"
+          @click="store.navigate('canvas')"
         >
-          <AppIcon name="grid" />节点画布</button
+          <AppIcon name="folder" /><span>{{
+            s.currentProject.name
+          }}</span></button
+        ><small
+          :class="{ 'save-error': s.saved === 'error' }"
+          :title="s.saveError"
+          role="status"
+          >{{ saveText }}</small
         ><button
-          id="refreshConnection"
-          class="icon-button"
-          title="重新检查连接"
-          aria-label="重新检查连接"
-          @click="store.checkHealth"
+          v-if="s.saved === 'error'"
+          class="sidebar-retry"
+          @click="store.flush"
         >
-          <AppIcon name="refresh" />
+          重试保存
         </button>
       </div>
-    </header>
-    <div class="project-bar">
-      <span
-        id="saveStatus"
-        :class="{ 'save-error': s.saved === 'error' }"
-        :title="s.saveError"
-        role="status"
-        >{{
-          s.saved === "saved"
-            ? "已保存到本机"
-            : s.saved === "error"
-              ? s.saveError
-              : s.saved === "loading"
-                ? "正在恢复项目…"
-                : "正在保存…"
-        }}</span
-      >
-      <div>
+      <div class="sidebar-bottom">
         <button
-          id="exportProject"
-          class="ghost-button"
-          @click="store.exportProject"
+          id="nav-settings"
+          aria-label="设置"
+          title="设置"
+          :class="{ active: s.view === 'settings' }"
+          :disabled="s.projectBusy"
+          @click="store.openSettings(s.settingsTab)"
         >
-          导出项目</button
-        ><button
-          id="importProject"
-          class="ghost-button"
-          @click="importInput.click()"
-        >
-          导入项目</button
-        ><input
-          ref="importInput"
-          class="hidden"
-          type="file"
-          accept="application/json,.json"
-          @change="
-            (event) => {
-              store.importProject(event.target.files[0]);
-              event.target.value = '';
-            }
-          "
-        />
+          <AppIcon name="settings" /><span>设置</span></button
+        ><small>本机保存 · 项目自动同步</small>
       </div>
-    </div>
-    <EngineSwitch :store="store" @configure="openSettings" />
-    <main class="workspace">
-      <GenerationForm :store="store" /><ResultPanel
+    </aside>
+    <div class="studio-content" :inert="s.projectBusy">
+      <header v-show="!s.boardOpen" class="studio-header">
+        <div>
+          <span class="header-eyebrow">{{
+            s.view === "workbench" ? "创作" : "工作空间"
+          }}</span>
+          <h1>{{ pageTitle }}</h1>
+        </div>
+        <div class="studio-header-actions">
+          <div
+            id="connectionPill"
+            class="connection-pill"
+            :data-state="s.health.state"
+          >
+            <span class="status-dot"></span
+            ><span id="connectionText">{{
+              s.health.state === "online"
+                ? s.engine.provider === "api"
+                  ? "API 已连接"
+                  : "ComfyUI 已连接"
+                : s.health.state === "checking"
+                  ? "正在检查连接"
+                  : s.engine.provider === "api"
+                    ? "API 未连接"
+                    : "ComfyUI 未连接"
+            }}</span>
+          </div>
+          <button
+            id="refreshConnection"
+            class="icon-button"
+            title="重新检查连接"
+            aria-label="重新检查连接"
+            @click="store.checkHealth"
+          >
+            <AppIcon name="refresh" /></button
+          ><button
+            v-if="s.view === 'workbench'"
+            id="openBoard"
+            class="ghost-button"
+            @click="store.navigate('canvas')"
+          >
+            <AppIcon name="grid" />打开画布
+          </button>
+        </div>
+      </header>
+      <div v-show="s.view === 'workbench'" class="app-shell workbench-page">
+        <EngineSwitch :store="store" @configure="configure" />
+        <main class="workspace">
+          <GenerationForm :store="store" /><ResultPanel
+            :store="store"
+          /><TaskHistory :store="store" />
+        </main>
+      </div>
+      <ProjectsCenter
+        v-if="s.view === 'projects'"
         :store="store"
-      /><TaskHistory :store="store" />
-    </main>
+        @import="importInput.click()"
+      />
+      <SettingsCenter
+        v-if="s.view === 'settings'"
+        :store="store"
+        @setup-local="setup"
+      />
+      <CanvasBoard :store="store" @configure-engine="configure" />
+    </div>
+    <input
+      ref="importInput"
+      class="hidden"
+      type="file"
+      accept="application/json,.json"
+      @change="importFile"
+    />
   </div>
-  <CanvasBoard :store="store" @configure-engine="openSettings" /><PreviewDialog
-    :preview="s.preview"
-    @close="s.preview = null"
-  />
   <SetupWizard
     :open="setupOpen"
     :auto-check="s.ready && s.engine.provider === 'local'"
-    :return-label="returningToSettings ? '返回生图配置' : '返回工作台'"
-    @close="closeSetup"
-    @needs-setup="needsSetup"
+    return-label="返回设置"
+    @close="setupOpen = false"
+    @needs-setup="store.toast('本地引擎需要配置，请打开设置 → 本地模型')"
     @changed="store.checkHealth"
   />
-  <WorkbenchSettings
-    :open="settingsOpen"
-    :store="store"
-    :initial-provider="settingsProvider"
-    @close="closeSettings"
-    @setup-local="configureLocal"
-  />
+  <PreviewDialog :preview="s.preview" @close="s.preview = null" />
   <div
     id="toast"
     class="toast"

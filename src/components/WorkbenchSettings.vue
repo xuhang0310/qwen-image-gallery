@@ -7,6 +7,7 @@ const props = defineProps({
   open: Boolean,
   store: Object,
   initialProvider: String,
+  embedded: Boolean,
 });
 const emit = defineEmits(["close", "setup-local"]);
 const { s } = props.store;
@@ -25,8 +26,8 @@ const form = reactive({
 let previous;
 const modelInfo = computed(() => imageProfile(form.model));
 watch(
-  () => props.open,
-  async (value) => {
+  () => [props.open, s.ready],
+  async ([value]) => {
     form.apiKey = "";
     result.value = null;
     error.value = "";
@@ -38,15 +39,16 @@ watch(
         model: s.engine.model,
         removeKey: false,
       });
-      document.body.classList.add("api-settings-open");
+      if (!props.embedded) document.body.classList.add("api-settings-open");
       await nextTick();
-      first.value?.focus();
+      if (!props.embedded) first.value?.focus();
     } else {
       document.body.classList.remove("api-settings-open");
       await nextTick();
       previous?.focus();
     }
   },
+  { immediate: true },
 );
 function close() {
   if (!busy.value) emit("close");
@@ -64,6 +66,7 @@ watch(
   },
 );
 function key(event) {
+  if (props.embedded) return;
   if (event.key === "Escape") {
     event.preventDefault();
     event.stopPropagation();
@@ -98,7 +101,7 @@ async function save(check = false) {
     if (provider.value === "local") {
       await props.store.saveEngine({ provider: "local" });
       props.store.toast("已使用本地模型，工作台和画布共用此配置");
-      emit("close");
+      if (!props.embedded) emit("close");
       return;
     }
     await props.store.saveEngine({
@@ -115,7 +118,7 @@ async function save(check = false) {
         );
     } else {
       props.store.toast("API 配置已保存，工作台和画布共用此配置");
-      emit("close");
+      if (!props.embedded) emit("close");
     }
   } catch (failure) {
     error.value = failure.message;
@@ -126,14 +129,19 @@ async function save(check = false) {
 onBeforeUnmount(() => document.body.classList.remove("api-settings-open"));
 </script>
 <template>
-  <Teleport to="body">
-    <div v-if="open" class="api-settings-layer" @keydown="key">
-      <div class="api-settings-backdrop" @click="close"></div>
+  <Teleport to="body" :disabled="embedded">
+    <div
+      v-if="open"
+      class="api-settings-layer"
+      :class="{ 'settings-embedded': embedded }"
+      @keydown="key"
+    >
+      <div v-if="!embedded" class="api-settings-backdrop" @click="close"></div>
       <section
         ref="panel"
         class="api-settings-panel"
-        role="dialog"
-        aria-modal="true"
+        :role="embedded ? 'region' : 'dialog'"
+        :aria-modal="embedded ? undefined : true"
         aria-labelledby="api-settings-title"
         :aria-busy="busy"
       >
@@ -144,6 +152,7 @@ onBeforeUnmount(() => document.body.classList.remove("api-settings-open"));
             <p>图像工作台与无限画布共用同一套引擎和模型。</p>
           </div>
           <button
+            v-if="!embedded"
             type="button"
             class="icon-button"
             ref="first"
