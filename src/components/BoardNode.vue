@@ -6,6 +6,7 @@ import GenerationComposer from "./GenerationComposer.vue";
 import AppIcon from "./AppIcon.vue";
 import VideoComposer from "./VideoComposer.vue";
 import VideoResult from "./VideoResult.vue";
+import VideoPrompt from "./VideoPrompt.vue";
 const props = defineProps({
   node: Object,
   selected: Boolean,
@@ -13,6 +14,7 @@ const props = defineProps({
   unavailable: Boolean,
   config: Object,
   reference: Object,
+  references: Array,
   referenceCount: Number,
   videoEngine: Object,
 });
@@ -34,8 +36,8 @@ onBeforeUnmount(() => observer?.disconnect());
 const pending = computed(() =>
   ["loading", "failed"].includes(props.node.status),
 );
-function action(name) {
-  emit("action", name, props.node);
+function action(name, detail) {
+  emit("action", name, props.node, detail);
 }
 </script>
 <template>
@@ -50,6 +52,7 @@ function action(name) {
       'is-text': node.status === 'text',
       'is-video': node.kind === 'video',
       'is-video-generator': node.kind === 'video-generator',
+      'is-video-prompt': node.kind === 'video-prompt',
     }"
     :data-node-id="node.id"
     :style="{ left: node.x + 'px', top: node.y + 'px' }"
@@ -60,6 +63,18 @@ function action(name) {
       @delete="action('delete')"
       @cancel="action('cancel-video')"
       @retry="action('retry-video')"
+    />
+    <VideoPrompt
+      v-else-if="node.kind === 'video-prompt'"
+      :node="node"
+      :disabled="disabled"
+      :engine="videoEngine"
+      @delete="action('delete')"
+      @update="action('update-video-prompt')"
+      @expand="action('expand-video-prompt')"
+      @configure-ai="action('configure-prompt-ai')"
+      @confirm="action('confirm-video')"
+      @check-engine="action('check-video')"
     />
     <template v-else>
       <div v-if="node.status === 'text'" class="node-heading">
@@ -110,12 +125,16 @@ function action(name) {
       <VideoComposer
         v-else-if="node.kind === 'video-generator'"
         :model="node"
+        :references="references"
         :reference="reference"
         :reference-count="referenceCount"
         :disabled="disabled"
         :engine="videoEngine"
         @submit="action('run-video')"
-        @remove-reference="action('unlink')"
+        @optimize="action('optimize-inline-video')"
+        @configure-ai="action('configure-prompt-ai')"
+        @remove-reference="action('unlink-video-reference', $event)"
+        @upload-references="action('upload-video-references', $event)"
         @check-engine="action('check-video')"
       />
       <GenerationComposer
@@ -148,6 +167,22 @@ function action(name) {
             : {}
         "
       />
+      <div v-if="node.imageEdit" class="board-image-edit-status" role="status">
+        {{
+          node.imageEdit.status === "preparing"
+            ? "准备编辑…"
+            : node.imageEdit.status === "queued"
+              ? "图片编辑排队中…"
+              : "正在编辑图片…"
+        }}
+      </div>
+      <div
+        v-else-if="node.imageEditError"
+        class="board-image-edit-status"
+        role="alert"
+      >
+        {{ node.imageEditError }}
+      </div>
       <div v-if="node.status !== 'text'" class="board-node-meta">
         <span>{{
           node.status === "text" ? "文本节点" : summarize(node.prompt, 20)
@@ -180,6 +215,7 @@ function action(name) {
             data-action="edit"
             title="基于这张图编辑"
             aria-label="基于这张图编辑"
+            :disabled="!!node.imageEdit"
             @click="action('edit')"
           >
             <AppIcon name="edit" /></button></template

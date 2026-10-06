@@ -7,10 +7,11 @@
     "start": "npm run build && node server.js",
     "dev": "vite",
     "build": "vite build",
-    "check": "node --check server.js && node --check lib/storage.js && node --check lib/setup.js && node --check lib/network.js && node --check lib/api-images.js && node --check lib/videos.js && node --check lib/video-scene.js && node --check shared/image-models.mjs && node --check shared/video.mjs && npm run build",
-    "test:video": "node --test tests/videos.test.cjs",
+    "check": "node --check server.js && node --check lib/storage.js && node --check lib/setup.js && node --check lib/network.js && node --check lib/api-images.js && node --check lib/videos.js && node --check lib/video-scene.js && node --check lib/video-prompt-ai.js && node --check shared/image-edit.mjs && node --check shared/video-references.mjs && node --check shared/video-timeline.mjs && node --check shared/video-inline.mjs && node --check shared/video-confirm.mjs && node --check shared/video-performance.mjs && node --check shared/image-models.mjs && node --check shared/video.mjs && npm run build",
+    "test:video": "node --test tests/videos.test.cjs tests/video-review-ui.test.cjs tests/video-prompt-ai.test.cjs tests/video-timeline.test.cjs tests/video-inline.test.cjs",
     "format": "prettier --write src lib shared server.js vite.config.mjs package.json README.md index.html",
-    "format:check": "prettier --check src lib shared server.js vite.config.mjs package.json README.md index.html"
+    "format:check": "prettier --check src lib shared server.js vite.config.mjs package.json README.md index.html",
+    "test:image": "node --test tests/image-edit.test.cjs"
   },
   "dependencies": {
     "express": "^5.1.0",

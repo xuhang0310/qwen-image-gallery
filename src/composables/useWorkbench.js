@@ -1,6 +1,11 @@
 import { reactive, computed, watch, onBeforeUnmount } from "vue";
 import defaults from "../../shared/config.json";
 import { imageFileError } from "../image-upload";
+import {
+  attachImageEdit,
+  failImageEdit,
+  syncImageEdit,
+} from "../../shared/image-edit.mjs";
 import apiProfile from "../../shared/api-image.json";
 import {
   imageProfile,
@@ -113,7 +118,10 @@ export function useWorkbench() {
   }
   function restoreNodeEngines(board) {
     for (const node of board.nodes)
-      if (node.status === "text" && node.kind !== "video-generator")
+      if (
+        node.status === "text" &&
+        !["video-generator", "video-prompt"].includes(node.kind)
+      )
         setNodeEngine(node, node);
     return board;
   }
@@ -295,7 +303,10 @@ export function useWorkbench() {
     }
   }
   function syncNode(job) {
-    for (const node of s.board.nodes.filter((n) => n.jobId === job.id)) {
+    for (const node of s.board.nodes.filter(
+      (n) => n.jobId === job.id || n.imageEdit?.jobId === job.id,
+    )) {
+      if (syncImageEdit(node, job)) continue;
       node.jobStatus = job.status;
       node.provider = job.provider || "local";
       node.model = job.model;
@@ -388,6 +399,12 @@ export function useWorkbench() {
         );
     }
     tick();
+  }
+  async function prepareVideo(parameters) {
+    return request("/api/videos/prepare", {
+      ...jsonOptions(parameters),
+      signal: AbortSignal.timeout(150000),
+    });
   }
   async function generateVideo(parameters, node) {
     s.inFlight++;
@@ -564,6 +581,11 @@ export function useWorkbench() {
     restoreNodeEngines(s.board);
     s.ready = true;
     for (const node of s.board.nodes) {
+      if (node.imageEdit) {
+        const editJob = s.jobs.find((j) => j.id === node.imageEdit.jobId);
+        if (editJob) syncNode(editJob);
+        else failImageEdit(node, "上次编辑已中断，原图已保留");
+      }
       const job = [...s.jobs, ...s.videoJobs].find((j) => j.id === node.jobId);
       if (job) syncNode(job);
       else if (node.status === "loading")
@@ -621,7 +643,11 @@ export function useWorkbench() {
     });
   }
 
-  async function generate(parameters, node = null) {
+  async function generate(
+    parameters,
+    node = null,
+    { replaceImage = false } = {},
+  ) {
     if (!node && s.submitting) {
       toast("正在提交，请稍候");
       return null;
@@ -648,15 +674,21 @@ export function useWorkbench() {
       s.jobs.sort((a, b) => b.createdAt - a.createdAt);
       if (order === submissionOrder) s.selectedJobId = job.id;
       if (node) {
-        node.jobId = job.id;
-        node.jobStatus = "queued";
-        node.provider = job.provider;
-        node.model = job.model;
+        if (replaceImage) attachImageEdit(node, job);
+        else {
+          node.jobId = job.id;
+          node.jobStatus = "queued";
+          node.provider = job.provider;
+          node.model = job.model;
+        }
       }
       pollJob(job.id);
       return job;
     } catch (error) {
-      if (node) Object.assign(node, { status: "failed", error: error.message });
+      if (node) {
+        if (replaceImage) failImageEdit(node, error.message);
+        else Object.assign(node, { status: "failed", error: error.message });
+      }
       toast(error.message);
       return null;
     } finally {
@@ -905,6 +937,7 @@ export function useWorkbench() {
     removeSource,
     generate,
     generateVideo,
+    prepareVideo,
     addVideo,
     checkVideoEngine,
     submitForm,

@@ -1,4 +1,6 @@
 import defaults from "../shared/config.json";
+import { validateVideoPromptNode } from "../shared/video-review.mjs";
+import { validateInlineVideoCache } from "../shared/video-inline.mjs";
 import { imageProfile, imageModels } from "../shared/image-models.mjs";
 import {
   safeVideoUrl,
@@ -62,7 +64,9 @@ export const nodeHeight = (node) =>
   node.status === "text"
     ? node.kind === "video-generator"
       ? 650
-      : 490
+      : node.kind === "video-prompt"
+        ? 800
+        : 490
     : node.kind === "video"
       ? node.status === "done" && node.width && node.height
         ? (360 * node.height) / node.width + 100
@@ -164,12 +168,51 @@ export function normalizeBoard(board = {}) {
     })
     .map((n) => {
       const node = { ...n, prompt: String(n.prompt || "").slice(0, 4000) };
+      if (
+        node.originalPrompt !== undefined &&
+        (typeof node.originalPrompt !== "string" ||
+          node.originalPrompt.length > 4000)
+      )
+        delete node.originalPrompt;
+      if (
+        node.imageEdit &&
+        (!node.imageEdit.jobId ||
+          typeof node.imageEdit.parameters?.prompt !== "string")
+      ) {
+        delete node.imageEdit;
+        node.imageEditError = "上次编辑已中断，原图已保留";
+      }
+      if (node.kind === "video-prompt") {
+        try {
+          validateVideoPromptNode(node);
+        } catch {
+          return null;
+        }
+        node.status = "text";
+        if (node.referenceUrl && !safeImageUrl(node.referenceUrl))
+          delete node.referenceUrl;
+        if (node.reviewPending)
+          node.reviewError = "上次整理已中断，请重新整理提示词。";
+        node.reviewPending = false;
+        node.aiWriting = false;
+        node.confirmPending = false;
+        return node;
+      }
       if (node.kind === "video-generator" || node.kind === "video") {
         if (!Object.hasOwn(videoRatios, node.ratio)) node.ratio = "16:9";
         if (!Object.hasOwn(videoQualities, node.quality)) node.quality = "480P";
         node.dialogue = String(node.dialogue || "").slice(0, 200);
         if (node.kind === "video-generator") {
           node.status = "text";
+          node.referencesUploading = false;
+          if (node.inlinePending)
+            node.inlineError = "上次提示词处理已中断，可以重新优化或生成视频。";
+          node.inlinePending = false;
+          try {
+            validateInlineVideoCache(node.inlineVideo);
+          } catch {
+            delete node.inlineVideo;
+          }
           if (!videoDurations.includes(node.seconds)) node.seconds = 6;
           if (!["contain", "cover", "front"].includes(node.framing))
             node.framing = "contain";
@@ -200,14 +243,16 @@ export function normalizeBoard(board = {}) {
       )
         node.quality = "2K";
       return node;
-    });
+    })
+    .filter(Boolean);
+  const keptIds = new Set(nodes.map((n) => n.id));
   return {
     nodes,
     edges: (Array.isArray(board.edges) ? board.edges : []).filter(
       (e) =>
         typeof e?.id === "string" &&
-        ids.has(e.from) &&
-        ids.has(e.to) &&
+        keptIds.has(e.from) &&
+        keptIds.has(e.to) &&
         e.from !== e.to &&
         ["left", "right"].includes(e.fromSide) &&
         ["left", "right"].includes(e.toSide),
@@ -238,6 +283,7 @@ export async function request(url, options = {}) {
       status: response.status,
       recoverable: data.recoverable,
       code: data.code,
+      draft: data.draft,
     });
     throw error;
   }

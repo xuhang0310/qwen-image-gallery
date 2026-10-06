@@ -1,7 +1,9 @@
 <script setup>
 import EngineSwitch from "./EngineSwitch.vue";
+import VideoPromptAISettings from "./VideoPromptAISettings.vue";
 import { useFileDrop, hasFiles } from "../composables/useFileDrop";
 import { imageFileError } from "../image-upload";
+import { beginImageEdit, failImageEdit } from "../../shared/image-edit.mjs";
 import {
   ref,
   reactive,
@@ -16,6 +18,12 @@ import SafeImage from "./SafeImage.vue";
 import GenerationComposer from "./GenerationComposer.vue";
 import AppIcon from "./AppIcon.vue";
 import { videoDimensions } from "../../shared/video.mjs";
+import { videoReviewReady } from "../../shared/video-review.mjs";
+import { confirmVideoReview } from "../../shared/video-confirm.mjs";
+import {
+  inlineVideoAction,
+  inlineVideoInputSignature,
+} from "../../shared/video-inline.mjs";
 import {
   pending,
   summarize,
@@ -35,6 +43,7 @@ const viewport = ref(),
   closeButton = ref(),
   editComposer = ref();
 const selected = ref(null),
+  promptSettingsOpen = ref(false),
   selectedEdge = ref(null),
   edit = ref(null),
   menu = ref(null),
@@ -60,6 +69,7 @@ const form = reactive({
   ratio: "9:16",
   quality: "2K",
   source: null,
+  target: null,
 });
 const libraryCount = ref(30);
 const libraryType = ref("image");
@@ -140,6 +150,29 @@ function select(id) {
   selected.value = id;
   selectedEdge.value = null;
 }
+async function focusVideoPrompt(node) {
+  await nextTick();
+  if (!s.boardOpen || selected.value !== node.id || !nodeMap.value.has(node.id))
+    return;
+  const rect = viewport.value?.getBoundingClientRect();
+  if (!rect?.width || !rect.height) return;
+  const space = Math.max(280, rect.width - 280);
+  const height = sizes.get(node.id) || 800;
+  const zoom = Math.max(
+    0.25,
+    Math.min(
+      board.value.zoom,
+      1,
+      (space - 40) / 480,
+      (rect.height - 60) / height,
+    ),
+  );
+  board.value.zoom = zoom;
+  board.value.pan = {
+    x: space / 2 - (node.x + 240) * zoom,
+    y: 30 - node.y * zoom,
+  };
+}
 function remove(id) {
   board.value.nodes = board.value.nodes.filter((n) => n.id !== id);
   board.value.edges = board.value.edges.filter(
@@ -147,7 +180,7 @@ function remove(id) {
   );
   sizes.delete(id);
   if (selected.value === id) selected.value = null;
-  if (form.source?.id === id) edit.value = null;
+  if (form.target?.id === id) edit.value = null;
 }
 function clearCanvas() {
   props.store.clearBoard();
@@ -159,6 +192,7 @@ function clearCanvas() {
   temporaryPath.value = "";
   sizes.clear();
   form.source = null;
+  form.target = null;
   s.preview = null;
 }
 function add(status, position, prompt = "") {
@@ -450,7 +484,15 @@ function apiUnavailable(selection) {
     !s.engine.keyConfigured
   );
 }
-async function run(prompt, ratio, quality, parent, reference, selection) {
+async function run(
+  prompt,
+  ratio,
+  quality,
+  parent,
+  reference,
+  selection,
+  replace = false,
+) {
   if (!s.ready || s.switching || submittingParents.has(parent?.id)) {
     props.store.toast("这个节点正在提交，请稍候");
     return;
@@ -464,34 +506,50 @@ async function run(prompt, ratio, quality, parent, reference, selection) {
     props.store.toast("请先在 API 配置中填写密钥");
     return;
   }
-  const node = addLoading(prompt.trim(), ratio, quality, parent, engine);
+  const parameters = { ...engine, prompt: prompt.trim(), ratio, quality };
+  const node = replace
+    ? parent
+    : addLoading(prompt.trim(), ratio, quality, parent, engine);
+  if (
+    replace &&
+    (!nodeMap.value.has(node?.id) || !beginImageEdit(node, parameters))
+  )
+    return;
   submittingParents.add(parent?.id);
   s.preparing++;
-  node.preparing = true;
+  if (!replace) node.preparing = true;
   try {
     const sourceImage = reference ? await prepareSource(reference) : undefined;
-    node.preparing = false;
+    if (replace && !nodeMap.value.has(node.id)) return;
+    if (!replace) node.preparing = false;
     await props.store.generate(
       {
-        ...engine,
-        prompt: prompt.trim(),
-        ratio,
-        quality,
+        ...parameters,
         mode: sourceImage ? "img2img" : "txt2img",
         sourceImage,
       },
       node,
+      { replaceImage: replace },
     );
   } catch (error) {
-    Object.assign(node, { status: "failed", error: error.message });
+    if (replace) failImageEdit(node, error.message);
+    else Object.assign(node, { status: "failed", error: error.message });
     props.store.toast(error.message);
   } finally {
     s.preparing--;
-    node.preparing = false;
+    if (!replace) node.preparing = false;
     submittingParents.delete(parent?.id);
   }
 }
-function action(name, node) {
+function action(name, node, detail) {
+  if (name === "optimize-inline-video") runInlineVideo(node, true);
+  if (name === "unlink-video-reference")
+    board.value.edges = board.value.edges.filter(
+      (e) => !(e.to === node.id && e.from === detail),
+    );
+  if (name === "upload-video-references") uploadVideoReferences(node, detail);
+  if (name === "configure-prompt-ai") promptSettingsOpen.value = true;
+  if (name === "expand-video-prompt") updateVideoPrompt(node, true);
   if (name === "check-video") props.store.checkVideoEngine();
   if (name === "cancel-video") {
     const job = s.videoJobs.find((j) => j.id === node.jobId);
@@ -500,7 +558,7 @@ function action(name, node) {
   if (name === "retry-video") {
     const job = s.videoJobs.find((j) => j.id === node.jobId);
     const parameters = node.videoParameters || job;
-    if (parameters) runVideo(node, null, parameters);
+    if (parameters) createVideoPrompt(node, null, parameters);
     else props.store.toast("请在视频生成节点重新提交");
   }
   if (name === "video") {
@@ -516,25 +574,27 @@ function action(name, node) {
       toSide: "left",
     });
   }
-  if (name === "run-video") {
-    const incoming = references.value.get(node.id) || [];
-    if (incoming.length > 1) {
-      props.store.toast("一个视频节点只能连接一张参考图");
-      return;
-    }
-    runVideo(node, incoming[0]);
+  if (name === "run-video") runInlineVideo(node);
+  if (name === "update-video-prompt") updateVideoPrompt(node);
+  if (name === "confirm-video") {
+    confirmVideoPrompt(node);
   }
   if (name === "delete") remove(node.id);
   if (name === "zoom")
     s.preview = { url: node.url, caption: summarize(node.prompt) };
   if (name === "pick") pick({ nodeId: node.id });
   if (name === "edit") {
+    if (node.imageEdit) {
+      props.store.toast("这张图片正在编辑，请稍候");
+      return;
+    }
     select(node.id);
     Object.assign(form, {
       prompt: "",
       ratio: node.ratio || "9:16",
       quality: node.quality || "2K",
       source: node,
+      target: node,
     });
     props.store.setNodeEngine(form, node);
     edit.value = true;
@@ -556,6 +616,257 @@ function action(name, node) {
     run(node.prompt, node.ratio, node.quality, node, incoming[0], node);
   }
 }
+async function runInlineVideo(node, optimize = false) {
+  if (!s.ready || s.switching || submittingParents.has(node.id)) return;
+  const incoming = () => references.value.get(node.id) || [];
+  const signature = () =>
+    inlineVideoInputSignature(node, incoming(), s.videoEngine.workflowPreset);
+  return inlineVideoAction(node, {
+    optimize,
+    signature,
+    isPresent: () => nodeMap.value.has(node.id),
+    isEngineReady: () => s.videoEngine.ready,
+    notify: (message) => props.store.toast(message),
+    prepare: async (expanding) => {
+      const inputs = incoming().map((r, i) => ({
+        node: r,
+        role: node.referenceRoles?.[r.id] || (i === 0 ? "character" : "scene"),
+      }));
+      if (inputs.length > (s.videoEngine.maxReferences || 9))
+        throw new Error("参考图超出当前工作流支持的数量");
+      const snapshot = JSON.parse(
+        JSON.stringify({
+          prompt: node.prompt,
+          dialogue: node.dialogue || "",
+          quality: node.quality,
+          ratio: node.ratio,
+          seconds: node.seconds,
+          framing: node.framing || "contain",
+          ...(node.seed !== undefined ? { seed: node.seed } : {}),
+        }),
+      );
+      s.preparing++;
+      try {
+        if (inputs.length) {
+          if (s.videoEngine.workflowPreset === "base")
+            snapshot.sourceImage = await prepareSource(inputs[0].node);
+          else {
+            snapshot.references = [];
+            for (const r of inputs)
+              snapshot.references.push({
+                role: r.role,
+                sourceImage: await prepareSource(r.node),
+              });
+          }
+        }
+        return await props.store.prepareVideo({
+          ...snapshot,
+          expand: expanding,
+          inlineOptimize: expanding,
+        });
+      } finally {
+        s.preparing--;
+      }
+    },
+    submit: (parameters) => runVideo(node, null, parameters),
+  });
+}
+
+async function uploadVideoReferences(parent, files) {
+  if (
+    parent.referencesUploading ||
+    parent.inlinePending ||
+    !nodeMap.value.has(parent.id)
+  )
+    return;
+  const count = (references.value.get(parent.id) || []).length;
+  if (count + files.length > (s.videoEngine.maxReferences || 9)) {
+    props.store.toast("视频最多支持 9 张参考图");
+    return;
+  }
+  for (const file of files) {
+    const error = imageFileError(file);
+    if (error) {
+      props.store.toast(error);
+      return;
+    }
+  }
+  parent.referencesUploading = true;
+  try {
+    for (const file of files) {
+      if (!nodeMap.value.has(parent.id)) break;
+      const pos = availablePosition(
+        board.value.nodes,
+        { x: parent.x - 300, y: parent.y },
+        280,
+      );
+      const image = add("loading", pos);
+      await uploadFile(file, { nodeId: image.id });
+      if (!nodeMap.value.has(parent.id) || !image.url) continue;
+      parent.referenceRoles ||= {};
+      parent.referenceRoles[image.id] = (references.value.get(parent.id) || [])
+        .length
+        ? "scene"
+        : "character";
+      board.value.edges.push({
+        id: crypto.randomUUID(),
+        from: image.id,
+        to: parent.id,
+        fromSide: "right",
+        toSide: "left",
+      });
+    }
+  } finally {
+    parent.referencesUploading = false;
+  }
+}
+
+async function createVideoPrompt(parent, reference, restored) {
+  if (!s.ready || submittingParents.has(parent.id)) return;
+  const source = restored || parent;
+  const snapshot = JSON.parse(
+    JSON.stringify({
+      prompt: source.prompt,
+      dialogue: restored?.dialogue || "",
+      quality: source.quality,
+      ratio: source.ratio || "16:9",
+      seconds: source.seconds,
+      framing: restored?.framing || "contain",
+      ...(source.seed !== undefined ? { seed: source.seed } : {}),
+      ...(source.references?.length
+        ? { references: source.references }
+        : source.sourceImage
+          ? { sourceImage: source.sourceImage }
+          : {}),
+    }),
+  );
+  if (!snapshot.prompt?.trim()) {
+    props.store.toast("请填写画面描述");
+    return;
+  }
+  const node = {
+    id: crypto.randomUUID(),
+    kind: "video-prompt",
+    status: "text",
+    ...availablePosition(
+      board.value.nodes,
+      { x: parent.x + nodeWidth(parent) + 90, y: parent.y },
+      800,
+    ),
+    prompt: snapshot.prompt,
+    quality: snapshot.quality,
+    ratio: snapshot.ratio,
+    seconds: snapshot.seconds,
+    dialogue: "",
+    videoParameters: snapshot,
+    review: source.review ? JSON.parse(JSON.stringify(source.review)) : null,
+    referenceNodeId: !Array.isArray(reference) ? reference?.id : undefined,
+    referenceNodes: Array.isArray(reference)
+      ? reference.map((r, i) => ({
+          id: r.id,
+          role:
+            parent.referenceRoles?.[r.id] || (i === 0 ? "character" : "scene"),
+        }))
+      : undefined,
+    reviewPending: false,
+  };
+  board.value.nodes.push(node);
+  board.value.edges.push({
+    id: crypto.randomUUID(),
+    from: parent.id,
+    to: node.id,
+    fromSide: "right",
+    toSide: "left",
+  });
+  const draft = nodeMap.value.get(node.id);
+  select(node.id);
+  submittingParents.add(parent.id);
+  try {
+    await focusVideoPrompt(draft);
+    await updateVideoPrompt(draft);
+    await focusVideoPrompt(draft);
+  } finally {
+    submittingParents.delete(parent.id);
+  }
+}
+
+async function updateVideoPrompt(node, expand = false) {
+  if (node.reviewPending || submittingParents.has(node.id)) return;
+  node.reviewPending = true;
+  node.reviewError = "";
+  node.aiWriting = expand || !node.review;
+  submittingParents.add(node.id);
+  s.preparing++;
+  try {
+    const snapshot = JSON.parse(JSON.stringify(node.videoParameters));
+    if (!snapshot.references?.length && node.referenceNodes?.length) {
+      snapshot.references = [];
+      for (const saved of node.referenceNodes) {
+        const reference = nodeMap.value.get(saved.id);
+        if (!reference?.url)
+          throw new Error("参考图已移除，请重新创建提示词卡片");
+        snapshot.references.push({
+          role: saved.role,
+          sourceImage: await prepareSource(reference),
+        });
+      }
+    }
+    if (
+      !snapshot.sourceImage &&
+      !snapshot.references?.length &&
+      node.referenceNodeId
+    ) {
+      const reference = nodeMap.value.get(node.referenceNodeId);
+      if (!reference?.url)
+        throw new Error("参考图已移除，请重新创建提示词卡片");
+      snapshot.sourceImage = await prepareSource(reference);
+    }
+    // Capture fields before awaiting; edits and original nodes cannot change this request.
+    const review = node.review
+      ? JSON.parse(JSON.stringify(node.review))
+      : undefined;
+    const prepared = await props.store.prepareVideo({
+      ...snapshot,
+      review,
+      expand: expand ? true : !review ? "auto" : false,
+    });
+    if (!nodeMap.value.has(node.id)) return;
+    node.videoParameters = prepared.parameters;
+    node.review = prepared.review;
+    node.referenceUrl = prepared.parameters.sourceImage
+      ? sourceUrl(prepared.parameters.sourceImage)
+      : "";
+    Object.assign(node, {
+      quality: prepared.parameters.quality,
+      ratio: prepared.parameters.ratio,
+      seconds: prepared.parameters.seconds,
+    });
+  } catch (error) {
+    if (error.draft?.review && nodeMap.value.has(node.id)) {
+      node.review = error.draft.review;
+      node.videoParameters = error.draft.parameters;
+    }
+    node.reviewError = error.message;
+    props.store.toast(error.message);
+  } finally {
+    node.reviewPending = false;
+    node.aiWriting = false;
+    submittingParents.delete(node.id);
+    s.preparing--;
+  }
+}
+
+async function confirmVideoPrompt(node) {
+  if (!s.ready || submittingParents.has(node.id)) return;
+  return confirmVideoReview(node, {
+    isPresent: () => nodeMap.value.has(node.id),
+    isEngineReady: () => s.videoEngine.ready,
+    prepare: () => updateVideoPrompt(node),
+    submit: (parameters) => runVideo(node, null, parameters),
+    notify: (message) => props.store.toast(message),
+  });
+}
+
 async function runVideo(parent, reference, restored) {
   if (!s.ready || submittingParents.has(parent.id)) return;
   const snapshot = JSON.parse(
@@ -609,7 +920,9 @@ async function runVideo(parent, reference, restored) {
     if (reference) snapshot.sourceImage = await prepareSource(reference);
     result.videoParameters = snapshot;
     result.preparing = false;
-    await props.store.generateVideo(snapshot, result);
+    const job = await props.store.generateVideo(snapshot, result);
+    if (job) parent.lastJobId = job.id;
+    return job;
   } catch (error) {
     Object.assign(result, { status: "failed", error: error.message });
     props.store.toast(error.message);
@@ -620,10 +933,17 @@ async function runVideo(parent, reference, restored) {
   }
 }
 function submitEdit() {
-  if (submittingParents.has(form.source?.id)) return;
+  const target = form.target;
+  if (
+    !target ||
+    !nodeMap.value.has(target.id) ||
+    target.imageEdit ||
+    submittingParents.has(target.id)
+  )
+    return;
   const source = form.source;
   if (!s.ready || s.switching || apiUnavailable(form)) return;
-  run(form.prompt, form.ratio, form.quality, source, source, form);
+  run(form.prompt, form.ratio, form.quality, target, source, form, true);
   if (form.prompt.trim()) edit.value = false;
 }
 function close() {
@@ -664,6 +984,10 @@ function dropFiles(files, event) {
     : worldPoint(event.clientX, event.clientY);
   const targetId = event.target.closest(".board-node")?.dataset.nodeId;
   const target = nodeMap.value.get(targetId);
+  if (target?.kind === "video-generator") {
+    uploadVideoReferences(target, files);
+    return;
+  }
   let count = 0;
   let rejected = false;
   for (const file of files) {
@@ -759,6 +1083,10 @@ onBeforeUnmount(() => {
 });
 </script>
 <template>
+  <VideoPromptAISettings
+    :open="promptSettingsOpen"
+    @close="promptSettingsOpen = false"
+  />
   <div
     id="boardOverlay"
     class="board-overlay"
@@ -886,6 +1214,7 @@ onBeforeUnmount(() => {
           :disabled="!s.ready || s.switching || submittingParents.has(node.id)"
           :unavailable="apiUnavailable(node)"
           :config="store.generationConfigFor(node)"
+          :references="references.get(node.id) || []"
           :reference="references.get(node.id)?.[0]"
           :reference-count="references.get(node.id)?.length || 0"
           :video-engine="s.videoEngine"
@@ -1030,7 +1359,7 @@ onBeforeUnmount(() => {
         </button>
         <div class="modal-heading">
           <h2>编辑图片</h2>
-          <span>基于参考图生成新画面</span>
+          <span>生成完成后替换原节点图片，保留位置与连线</span>
         </div>
         <GenerationComposer
           ref="editComposer"
@@ -1039,7 +1368,10 @@ onBeforeUnmount(() => {
           :reference="form.source"
           :reference-count="form.source ? 1 : 0"
           :disabled="
-            !s.ready || s.switching || submittingParents.has(form.source?.id)
+            !s.ready ||
+            s.switching ||
+            !!form.target?.imageEdit ||
+            submittingParents.has(form.target?.id)
           "
           :unavailable="apiUnavailable(form)"
           @change-engine="store.setNodeEngine(form, $event)"

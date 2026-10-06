@@ -16,6 +16,8 @@ const {
   safeVideoUrl,
 } = require("../shared/video.mjs");
 const template = require("../workflows/minimax-h3.json");
+const beta3Template = require("../workflows/minimax-h3-beta3-lite.json");
+const { videoReviewReady } = require("../shared/video-review.mjs");
 const parameters = {
   prompt: "A friendly presenter.",
   dialogue: "大家好，我是小雅。",
@@ -25,7 +27,10 @@ const parameters = {
   seed: 42,
 };
 
-async function harness(t, { translateScene } = {}) {
+async function harness(
+  t,
+  { translateScene, workflowPreset = "base", missingNode, promptAI } = {},
+) {
   const jobs = new Map(),
     histories = new Map(),
     calls = [];
@@ -47,10 +52,12 @@ async function harness(t, { translateScene } = {}) {
     });
     if (endpoint.startsWith("/object_info/")) {
       const name = endpoint.split("/").at(-1);
+      if (name === missingNode) return {};
       const required = {};
-      for (const node of Object.values(template).filter(
-        (node) => node.class_type === name,
-      ))
+      for (const node of [
+        ...Object.values(template),
+        ...Object.values(beta3Template),
+      ].filter((node) => node.class_type === name))
         for (const [key, value] of Object.entries(node.inputs))
           if (typeof value === "string")
             required[key] = [[...(required[key]?.[0] || []), value]];
@@ -63,7 +70,10 @@ async function harness(t, { translateScene } = {}) {
     if (endpoint === "/upload/image") {
       uploaded = Buffer.from(await options.body.get("image").arrayBuffer());
       return {
-        name: "reference.png",
+        name:
+          calls.filter((c) => c.endpoint === "/upload/image").length === 1
+            ? "reference.png"
+            : `reference-${calls.filter((c) => c.endpoint === "/upload/image").length}.png`,
         subfolder: "qwen-workbench",
         type: "input",
       };
@@ -111,6 +121,8 @@ async function harness(t, { translateScene } = {}) {
     validSourceImage: (source) =>
       source?.type === "input" && source?.subfolder === "qwen-workbench",
     isBusy: () => false,
+    workflowPreset,
+    promptAI,
     ...(translateScene ? { translateScene } : {}),
   });
   const server = app.listen(0, "127.0.0.1");
@@ -214,6 +226,65 @@ test("All three ratios render at both qualities and preserve speech/audio connec
   );
 });
 
+test("Beta_3_Lite uses Turbo, dual-clock audio, low-VRAM patches and connected MP4 sound", async (t) => {
+  for (const quality of ["480P", "720P"])
+    for (const ratio of ["9:16", "16:9", "1:1"]) {
+      const { workflow } = createVideoWorkflow(
+        { ...parameters, quality, ratio, workflowPreset: "beta3-lite" },
+        "reference.png",
+      );
+      assert.ok(workflow["1"].inputs.unet_name.includes("TURBO_ref2va_beta2"));
+      assert.equal(workflow["5"].class_type, "MiniMaxH3AudioConditioningT8");
+      assert.equal(workflow["5"].inputs.audio_mode, "native");
+      assert.deepEqual(workflow["5"].inputs.first_frame, ["16", 0]);
+      assert.equal(workflow["17"].inputs.head_chunks, 10);
+      assert.equal(workflow["18"].inputs.chunks, 4);
+      assert.equal(workflow["20"].inputs.cache_device, "cpu");
+      assert.equal(workflow["9"].inputs.steps, 8);
+      assert.equal(workflow["9"].inputs.sampler_name, "dual_clock_euler");
+      assert.deepEqual(workflow["11"].inputs.sampler, ["9", 1]);
+      assert.deepEqual(workflow["11"].inputs.sigmas, ["9", 2]);
+      assert.deepEqual(workflow["14"].inputs.audio, ["12", 1]);
+      assert.deepEqual(workflow["21"].inputs.image, ["13", 0]);
+      assert.ok(
+        workflow["5"].inputs.prompt.includes("<d>[CN]大家好，我是小雅。</d>"),
+      );
+      for (const node of Object.values(workflow))
+        for (const input of Object.values(node.inputs))
+          if (Array.isArray(input))
+            assert.ok(workflow[input[0]], "Every Beta node link resolves");
+      assert.ok(
+        !Object.values(workflow).some((node) =>
+          node.class_type.includes("LoraLoader"),
+        ),
+        "Turbo already merged; no double LoRA",
+      );
+    }
+  const h = await harness(t, { workflowPreset: "beta3-lite" });
+  const config = (await h.request("/api/videos/config")).data;
+  assert.equal(config.ready, true);
+  assert.equal(config.workflowLabel, "Beta_3_Lite");
+  const { response, data } = await h.request("/api/videos/generate", {
+    ...parameters,
+    workflowPreset: "base",
+  });
+  assert.equal(response.status, 202);
+  assert.equal(
+    data.workflowPreset,
+    "beta3-lite",
+    "Clients cannot override the configured workflow",
+  );
+  assert.equal(h.submitted["9"].inputs.steps, 8);
+  const incomplete = await harness(t, {
+    workflowPreset: "beta3-lite",
+    missingNode: "MiniMaxH3DualClockSamplerT8",
+  });
+  const rejected = await incomplete.request("/api/videos/generate", parameters);
+  assert.equal(rejected.response.status, 409);
+  assert.ok(rejected.data.error.includes("MiniMaxH3DualClockSamplerT8"));
+  assert.ok(!incomplete.calls.some((call) => call.endpoint === "/prompt"));
+});
+
 test("Rejects invalid quality, duration, empty input and malformed source before submitting", async (t) => {
   const h = await harness(t);
   for (const overrides of [
@@ -312,15 +383,31 @@ test("Questions, replies and shouts preserve Chinese dialogue outside scene tran
   assert.equal(parsed.spoken, true);
   assert.ok(parsed.scene.endsWith("厉声问道"));
   assert.ok(!parsed.scene.includes("哪里的魔族"));
-  for (const marker of ["问", "询问", "质问", "回答", "答道", "回应", "喊道", "叫喊"]) {
+  for (const marker of [
+    "问",
+    "询问",
+    "质问",
+    "回答",
+    "答道",
+    "回应",
+    "喊道",
+    "叫喊",
+  ]) {
     const audio = videoPromptAudio(`人物${marker}：“你是谁？”`);
     assert.deepEqual(audio.speechLines, ["你是谁？"], marker);
     assert.ok(!audio.scene.includes("你是谁"), marker);
     assert.equal(audio.spoken, true, marker);
   }
-  const conversation = videoPromptAudio("女人问道：你是谁？男人回答：我是旅人。");
+  const conversation = videoPromptAudio(
+    "女人问道：你是谁？男人回答：我是旅人。",
+  );
   assert.deepEqual(conversation.speechLines, ["你是谁？", "我是旅人。"]);
-  for (const scene of ["人物看向门口，目光中带着疑问", "女人抬剑戒备，男人走进客厅", "人物不要问道：你是谁？", "人物不会回答：你好。"]) {
+  for (const scene of [
+    "人物看向门口，目光中带着疑问",
+    "女人抬剑戒备，男人走进客厅",
+    "人物不要问道：你是谁？",
+    "人物不会回答：你好。",
+  ]) {
     const audio = videoPromptAudio(scene);
     assert.equal(audio.spoken, false, scene);
     assert.deepEqual(audio.speechLines, [], scene);
@@ -343,7 +430,10 @@ test("Questions, replies and shouts preserve Chinese dialogue outside scene tran
   assert.ok(enginePrompt.includes("<d>[CN]哪里的魔族？</d>"));
   assert.ok(enginePrompt.includes("in Mandarin Chinese"));
   assert.ok(!enginePrompt.includes("Where are the devils"));
-  assert.equal(/[\u3400-\u9fff]/.test(enginePrompt.replace(/<d>.*?<\/d>/g, "")), false);
+  assert.equal(
+    /[\u3400-\u9fff]/.test(enginePrompt.replace(/<d>.*?<\/d>/g, "")),
+    false,
+  );
   const sung = createVideoWorkflow({
     ...parameters,
     prompt: "人物唱歌：你好，小雅！",
@@ -575,6 +665,288 @@ test("Execution failures, interruptions and missing outputs become actionable te
   );
 });
 
+test("Prompt preparation separates colloquial Chinese dialogue and never queues a video", async (t) => {
+  const translated = [];
+  const h = await harness(t, {
+    workflowPreset: "beta3-lite",
+    translateScene: async (text) => {
+      translated.push(text);
+      return "A woman acts coyly with a slightly frightened expression.";
+    },
+  });
+  const result = await h.request("/api/videos/prepare", {
+    ...parameters,
+    dialogue: "",
+    prompt: "美女撒娇，你好凶啊，你好凶啊，好吓人",
+    ratio: "9:16",
+  });
+  assert.equal(result.response.status, 200);
+  const { review, parameters: frozen } = result.data;
+  assert.deepEqual(translated, ["美女撒娇"]);
+  assert.equal(review.vocalMode, "speech");
+  assert.equal(review.vocalText, "你好凶啊，你好凶啊，好吓人");
+  assert.match(review.enginePrompt, /in Mandarin Chinese/);
+  assert.ok(
+    review.enginePrompt.includes("<d>[CN]你好凶啊，你好凶啊，好吓人</d>"),
+  );
+  assert.equal(videoReviewReady(review, frozen), true);
+  assert.equal(h.calls.length, 0);
+  assert.equal(h.jobs.size, 0);
+});
+
+test("AI preparation stays before confirmation, edited performances need a fresh preview, and final prompt is submitted verbatim", async (t) => {
+  const { performanceSignature } = require("../shared/video-performance.mjs");
+  let writes = 0;
+  const promptAI = {
+    publicSettings: () => ({ ready: true }),
+    write: async (review, p) => {
+      writes++;
+      const performance = review.performance || {
+        overview: "由平静到轻轻撒娇。",
+        startingState: "双眼干燥，眉毛自然。",
+        camera: "正前方平视，持续" + p.seconds + "秒。",
+        beats: [
+          {
+            line: review.vocalText,
+            face: "眉心微抬，嘴角下落。",
+            volume: "轻声",
+            pace: "慢速",
+            pitch: "稍高",
+            pauseBefore: 0,
+          },
+        ],
+      };
+      const performanceEnglish = {
+        overview: "From neutral to a gentle pout.",
+        startingState: "Dry eyes and relaxed brows.",
+        camera: "The camera holds a static shot for " + p.seconds + " seconds.",
+        beats: performance.beats.map((b) => ({
+          ...b,
+          face: "The inner brows rise.",
+          volume: "Soft",
+          pace: "Slow",
+          pitch: "Slightly higher",
+        })),
+      };
+      const next = {
+        ...review,
+        performance,
+        performanceEnglish,
+        sceneEnglish: "A woman looks into the camera.",
+        aiModel: "gpt-6.1-sol",
+        performanceParameters: [p.seconds, p.ratio],
+        ...(review.timeline
+          ? {
+              timelineEnglish: review.timeline.map((s) => ({
+                ...s,
+                action: "The woman performs the reviewed action.",
+              })),
+            }
+          : {}),
+      };
+      next.performanceSignature = performanceSignature(next);
+      return next;
+    },
+  };
+  const h = await harness(t, {
+    workflowPreset: "beta3-lite",
+    promptAI,
+    translateScene: async () => {
+      throw new Error("AI expansion should provide the English scene");
+    },
+  });
+  const { data: prepared, response } = await h.request("/api/videos/prepare", {
+    ...parameters,
+    prompt: "美女撒娇，你好凶啊",
+    dialogue: "",
+    expand: "auto",
+  });
+  assert.equal(response.status, 200);
+  assert.equal(writes, 1);
+  assert.equal(h.jobs.size, 0);
+  assert.equal(h.calls.length, 0);
+  assert.ok(videoReviewReady(prepared.review, prepared.parameters));
+  const edited = structuredClone(prepared);
+  edited.review.performance.beats[0].volume = "更轻";
+  assert.equal(
+    (
+      await h.request("/api/videos/generate", {
+        ...edited.parameters,
+        review: edited.review,
+        approved: true,
+      })
+    ).response.status,
+    400,
+  );
+  const { data: updated } = await h.request("/api/videos/prepare", {
+    ...edited.parameters,
+    review: edited.review,
+  });
+  assert.equal(writes, 2);
+  assert.equal(updated.review.performance.beats[0].volume, "更轻");
+  const cached = await h.request("/api/videos/prepare", {
+    ...updated.parameters,
+    review: updated.review,
+  });
+  assert.equal(cached.response.status, 200);
+  assert.equal(writes, 2);
+  const resized = await h.request("/api/videos/prepare", {
+    ...updated.parameters,
+    seconds: 10,
+    review: {
+      ...updated.review,
+      timeline: updated.review.timeline.map((s, i, a) =>
+        i === a.length - 1 ? { ...s, end: 10 } : s,
+      ),
+    },
+  });
+  assert.equal(resized.response.status, 200);
+  assert.equal(writes, 3);
+  assert.equal(resized.data.review.timeline.at(-1).end, 10);
+  const { response: generated } = await h.request("/api/videos/generate", {
+    ...updated.parameters,
+    review: updated.review,
+    approved: true,
+  });
+  assert.equal(generated.status, 202);
+  assert.equal(h.submitted["5"].inputs.prompt, updated.review.enginePrompt);
+  assert.equal((h.submitted["5"].inputs.prompt.match(/<d>/g) || []).length, 1);
+});
+
+test("Review confirmation submits the preview verbatim without a second translation", async (t) => {
+  let translations = 0;
+  const h = await harness(t, {
+    workflowPreset: "beta3-lite",
+    translateScene: async () => {
+      translations++;
+      return "The woman waves to the camera.";
+    },
+  });
+  const { data: prepared } = await h.request("/api/videos/prepare", {
+    ...parameters,
+    prompt: "人物微笑挥手，人物说：你好呀。",
+    dialogue: "",
+    ratio: "1:1",
+    sourceImage: { name: "managed.png" },
+  });
+  const submission = { ...prepared.parameters, review: prepared.review };
+  assert.equal(
+    (await h.request("/api/videos/generate", submission)).response.status,
+    400,
+  );
+  for (const altered of [
+    { ...submission, seconds: 10 },
+    { ...submission, sourceImage: undefined },
+    { ...submission, review: { ...submission.review, vocalText: "改了台词" } },
+    { ...submission, review: { ...submission.review, vocalMode: "none" } },
+    { ...submission, review: { ...submission.review, workflowPreset: "base" } },
+  ]) {
+    assert.equal(
+      (await h.request("/api/videos/generate", { ...altered, approved: true }))
+        .response.status,
+      400,
+    );
+  }
+  assert.equal(h.jobs.size, 0);
+  const { response, data: job } = await h.request("/api/videos/generate", {
+    ...submission,
+    approved: true,
+  });
+  assert.equal(response.status, 202);
+  assert.equal(translations, 1);
+  assert.equal(h.submitted["5"].inputs.prompt, submission.review.enginePrompt);
+  assert.equal(job.approvedPrompt, submission.review.enginePrompt);
+  assert.equal(job.dialogue, "你好呀。");
+  assert.equal(h.jobs.get(job.id).review.vocalText, "你好呀。");
+  assert.deepEqual(h.submitted["5"].inputs.first_frame, ["16", 0]);
+});
+
+test("Failed scene translation leaves an editable draft and never submits an incomplete preview", async (t) => {
+  const h = await harness(t, {
+    translateScene: async () => {
+      throw new Error("翻译未就绪");
+    },
+  });
+  const { response, data } = await h.request("/api/videos/prepare", {
+    ...parameters,
+    dialogue: "",
+    prompt: "人物挥手，人物说：你好。",
+    ratio: "16:9",
+  });
+  assert.equal(response.status, 400);
+  assert.equal(data.draft.review.vocalText, "你好。");
+  assert.ok(data.draft.parameters.seed >= 0);
+  assert.equal(
+    videoReviewReady(data.draft.review, data.draft.parameters),
+    false,
+  );
+  assert.equal(
+    (
+      await h.request("/api/videos/generate", {
+        ...data.draft.parameters,
+        review: data.draft.review,
+        approved: true,
+      })
+    ).response.status,
+    400,
+  );
+  assert.equal(h.jobs.size, 0);
+  assert.equal(h.calls.length, 0);
+});
+
+test("Editing a draft requires a new preview and supports singing or removing dialogue", async (t) => {
+  const translated = [];
+  const h = await harness(t, {
+    translateScene: async (text) => {
+      translated.push(text);
+      return "The woman dances joyfully to DJ music.";
+    },
+  });
+  const { data: first } = await h.request("/api/videos/prepare", {
+    ...parameters,
+    dialogue: "",
+    prompt: "美女跟着DJ音乐跳舞，唱歌：我的家在东北",
+    ratio: "16:9",
+  });
+  assert.equal(first.review.vocalMode, "singing");
+  assert.equal(first.review.vocalText, "我的家在东北");
+  const edited = {
+    ...first.review,
+    vocalText: "大家好，我是小雅。",
+    vocalMode: "speech",
+  };
+  assert.equal(videoReviewReady(edited, first.parameters), false);
+  const { data: updated } = await h.request("/api/videos/prepare", {
+    ...first.parameters,
+    review: edited,
+  });
+  assert.equal(videoReviewReady(updated.review, updated.parameters), true);
+  assert.match(updated.review.enginePrompt, /speaks with/);
+  assert.doesNotMatch(
+    updated.review.enginePrompt,
+    /sings melodically|我的家在东北/,
+  );
+  const { data: silent } = await h.request("/api/videos/prepare", {
+    ...updated.parameters,
+    review: { ...updated.review, vocalMode: "none" },
+  });
+  assert.doesNotMatch(silent.review.enginePrompt, /<d>|Mandarin Chinese/);
+  assert.equal(h.jobs.size, 0);
+  const { data: visual } = await h.request("/api/videos/prepare", {
+    ...parameters,
+    dialogue: "",
+    prompt: "美女撒娇，镜头缓缓向右移动",
+    ratio: "16:9",
+  });
+  assert.equal(visual.review.vocalMode, "none");
+  assert.ok(
+    translated.every(
+      (text) =>
+        !text.includes("我的家在东北") && !text.includes("大家好，我是小雅"),
+    ),
+  );
+});
+
 test("Project save/import preserves video nodes and restores video records without overwriting live jobs", async (t) => {
   const fs = require("node:fs");
   const path = require("node:path");
@@ -596,6 +968,13 @@ test("Project save/import preserves video nodes and restores video records witho
   const base = `http://127.0.0.1:${server.address().port}`;
   const id = crypto.randomUUID();
   const videoUrl = `/api/videos/media/${id}`;
+  const h = await harness(t, {
+    translateScene: async () => "The woman waves.",
+  });
+  const { data: prepared } = await h.request("/api/videos/prepare", {
+    ...parameters,
+    ratio: "16:9",
+  });
   const job = {
     id,
     mediaType: "video",
@@ -620,6 +999,17 @@ test("Project save/import preserves video nodes and restores video records witho
     hiddenJobIds: [],
     board: {
       nodes: [
+        {
+          id: "prompt-card",
+          kind: "video-prompt",
+          status: "text",
+          x: 1200,
+          y: 0,
+          prompt: prepared.parameters.prompt,
+          videoParameters: prepared.parameters,
+          review: prepared.review,
+          reviewPending: false,
+        },
         {
           id: "generator",
           kind: "video-generator",
@@ -665,10 +1055,21 @@ test("Project save/import preserves video nodes and restores video records witho
     });
   assert.equal((await save(project)).status, 200);
   const restored = await (await fetch(base + "/api/project")).json();
-  assert.equal(restored.board.nodes[0].quality, "720P");
-  assert.equal(restored.board.nodes[0].ratio, "9:16");
+  assert.equal(
+    restored.board.nodes[0].review.enginePrompt,
+    prepared.review.enginePrompt,
+  );
+  assert.equal(
+    videoReviewReady(
+      restored.board.nodes[0].review,
+      restored.board.nodes[0].videoParameters,
+    ),
+    true,
+  );
+  assert.equal(restored.board.nodes[1].quality, "720P");
+  assert.equal(restored.board.nodes[1].ratio, "9:16");
   assert.equal(restored.videoJobs[0].ratio, "1:1");
-  assert.equal(restored.board.nodes[1].url, videoUrl);
+  assert.equal(restored.board.nodes[2].url, videoUrl);
   assert.equal(restored.board.edges.length, 1);
   const videos = await (await fetch(base + "/api/videos/jobs")).json();
   assert.equal(videos.jobs[0].status, "completed");
@@ -686,16 +1087,219 @@ test("Project save/import preserves video nodes and restores video records witho
   );
   const latest = await (await fetch(base + "/api/project")).json();
   for (const ratio of ["16:9", "1:1"]) {
-    latest.board.nodes[0].ratio = ratio;
+    latest.board.nodes[1].ratio = ratio;
     const response = await save(latest);
     assert.equal(response.status, 200);
     const current = await (await fetch(base + "/api/project")).json();
-    assert.equal(current.board.nodes[0].ratio, ratio);
+    assert.equal(current.board.nodes[1].ratio, ratio);
     latest.revision = current.revision;
   }
-  latest.board.nodes[0].ratio = "4:3";
+  latest.board.nodes[1].ratio = "4:3";
   assert.equal((await save(latest)).status, 400);
-  latest.board.nodes[0].ratio = "1:1";
-  latest.board.nodes[1].url = "https://untrusted/video.mp4";
+  latest.board.nodes[1].ratio = "1:1";
+  latest.board.nodes[2].url = "https://untrusted/video.mp4";
   assert.equal((await save(latest)).status, 400);
+});
+
+test("Multiple references keep independent roles, upload separately and condition Ref2VA rather than a first frame", async (t) => {
+  const h = await harness(t, {
+    workflowPreset: "beta3-lite",
+    translateScene: async () =>
+      "The referenced character waves inside scene reference 1.",
+  });
+  const references = ["character", "scene", "scene"].map((role, i) => ({
+    role,
+    sourceImage: {
+      name: "source-" + i + ".png",
+      subfolder: "qwen-workbench",
+      type: "input",
+    },
+  }));
+  const input = { ...parameters, references };
+  const prepared = await h.request("/api/videos/prepare", input);
+  assert.equal(prepared.response.status, 200);
+  assert.deepEqual(prepared.data.parameters.references, references);
+  const prompt = prepared.data.review.enginePrompt;
+  assert.match(prompt, /<Picture 1> is character reference 1/);
+  assert.match(prompt, /<Picture 2> is scene reference 1/);
+  assert.match(prompt, /<Picture 3> is scene reference 2/);
+  assert.ok(!h.submitted);
+  const changed = structuredClone(prepared.data);
+  changed.parameters.references[1].role = "character";
+  const stale = await h.request("/api/videos/generate", {
+    ...changed.parameters,
+    review: changed.review,
+    approved: true,
+  });
+  assert.equal(stale.response.status, 400);
+  assert.ok(!h.submitted);
+  const generated = await h.request("/api/videos/generate", {
+    ...prepared.data.parameters,
+    review: prepared.data.review,
+    approved: true,
+  });
+  assert.equal(generated.response.status, 202);
+  assert.equal(h.calls.filter((c) => c.endpoint === "/upload/image").length, 3);
+  assert.equal(h.submitted["5"].inputs.task_type, "Ref2VA");
+  assert.equal(h.submitted["5"].inputs.first_frame, undefined);
+  assert.equal(h.submitted["5"].inputs.prompt, prompt);
+  for (let i = 0; i < 3; i++)
+    assert.deepEqual(h.submitted["5"].inputs["ref_images.ref_image_" + i], [
+      String(30 + i),
+      0,
+    ]);
+  assert.notEqual(
+    h.submitted["30"].inputs.image,
+    h.submitted["31"].inputs.image,
+  );
+  const size = await sharp(h.uploaded).metadata();
+  assert.ok(
+    Math.abs(size.width / size.height - 753 / 560) < 0.01,
+    "References preserve their aspect ratio",
+  );
+  assert.deepEqual(generated.data.references, references);
+});
+
+test("Reference limits, invalid sources, mixed first-frame inputs and unsupported models fail before any upload or queue", async (t) => {
+  const h = await harness(t, { workflowPreset: "beta3-lite" });
+  const good = {
+    role: "scene",
+    sourceImage: {
+      name: "managed.png",
+      subfolder: "",
+      type: "input",
+      provider: "api",
+    },
+  };
+  for (const refs of [
+    [],
+    Array(10).fill(good),
+    [{ ...good, role: "invalid" }],
+    [
+      {
+        role: "scene",
+        sourceImage: {
+          name: "missing.png",
+          subfolder: "invalid",
+          type: "input",
+        },
+      },
+    ],
+  ]) {
+    const r = await h.request("/api/videos/generate", {
+      ...parameters,
+      references: refs,
+    });
+    assert.equal(r.response.status, 400);
+  }
+  assert.equal(
+    (
+      await h.request("/api/videos/prepare", {
+        ...parameters,
+        references: [good],
+        sourceImage: good.sourceImage,
+      })
+    ).response.status,
+    400,
+  );
+  const base = await harness(t);
+  assert.equal(
+    (
+      await base.request("/api/videos/generate", {
+        ...parameters,
+        references: [good],
+      })
+    ).response.status,
+    400,
+  );
+  assert.equal(
+    h.calls.filter((c) => ["/prompt", "/upload/image"].includes(c.endpoint))
+      .length,
+    0,
+  );
+  assert.equal(base.calls.length, 0);
+});
+
+test("Inline optimization returns readable text and a signed H3 prompt; direct generation uses that exact hidden prompt", async (t) => {
+  const h = await harness(t, {
+    workflowPreset: "beta3-lite",
+    promptAI: {
+      publicSettings: () => ({ ready: true }),
+      write: async (r, p) => ({
+        ...r,
+        sceneEnglish: "The woman smiles and waves.",
+        timeline: [
+          { start: 0, end: p.seconds, action: "女人微笑挥手，说第一句。" },
+        ],
+        timelineEnglish: [
+          {
+            start: 0,
+            end: p.seconds,
+            action:
+              "The woman smiles and waves while delivering the first sentence.",
+          },
+        ],
+      }),
+    },
+  });
+  const optimized = await h.request("/api/videos/prepare", {
+    ...parameters,
+    expand: true,
+    inlineOptimize: true,
+  });
+  assert.equal(optimized.response.status, 200);
+  assert.match(optimized.data.parameters.prompt, /0–6s/);
+  assert.match(
+    optimized.data.parameters.prompt,
+    /人物台词（原文）：大家好，我是小雅。/,
+  );
+  assert.doesNotMatch(
+    optimized.data.parameters.prompt,
+    /<d>|integrated_multimodal_description/,
+  );
+  assert.equal(
+    videoReviewReady(optimized.data.review, optimized.data.parameters),
+    true,
+  );
+  assert.equal(h.calls.filter((c) => c.endpoint === "/prompt").length, 0);
+  const stale = await h.request("/api/videos/generate", {
+    ...optimized.data.parameters,
+    prompt: optimized.data.parameters.prompt + "慢慢点头",
+    review: optimized.data.review,
+    approved: true,
+  });
+  assert.equal(stale.response.status, 400);
+  const generated = await h.request("/api/videos/generate", {
+    ...optimized.data.parameters,
+    review: optimized.data.review,
+    approved: true,
+  });
+  assert.equal(generated.response.status, 202);
+  assert.equal(
+    h.submitted["5"].inputs.prompt,
+    optimized.data.review.enginePrompt,
+  );
+  assert.ok(
+    h.submitted["5"].inputs.prompt.includes("<d>[CN]大家好，我是小雅。</d>"),
+  );
+  const edited = await h.request("/api/videos/prepare", {
+    ...optimized.data.parameters,
+    prompt: optimized.data.parameters.prompt.replace(
+      "大家好，我是小雅。",
+      "你好。今天很开心！",
+    ),
+    expand: false,
+  });
+  assert.equal(edited.response.status, 200);
+  assert.equal(edited.data.review.vocalText, "你好。今天很开心！");
+  assert.equal(
+    (
+      await h.request("/api/videos/prepare", {
+        ...parameters,
+        inlineOptimize: true,
+        expand: false,
+      })
+    ).response.status,
+    400,
+  );
 });

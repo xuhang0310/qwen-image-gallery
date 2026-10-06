@@ -1,5 +1,6 @@
 {
   "port": 3788,
+  "videoWorkflow": "beta3-lite",
   "comfyUrl": "http://127.0.0.1:8000",
   "comfyBase": "",
   "comfyMain": "",

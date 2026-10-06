@@ -2004,3 +2004,9 @@ button svg {
     transition-duration: 0.01ms !important;
   }
 }
+.board-image-edit-status {
+  padding: 8px 10px;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--muted);
+}

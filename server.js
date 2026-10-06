@@ -11,6 +11,9 @@ const { createSetup, loadRuntime } = require("./lib/setup");
 const { configureNetwork } = require("./lib/network");
 const { createApiImages } = require("./lib/api-images");
 const { createVideos } = require("./lib/videos");
+const { createVideoPromptAI } = require("./lib/video-prompt-ai");
+const { validateVideoPromptNode } = require("./shared/video-review.mjs");
+const { validateInlineVideoCache } = require("./shared/video-inline.mjs");
 const {
   videoQualities,
   videoRatios,
@@ -876,6 +879,19 @@ function validateProject(value) {
       (typeof node.prompt !== "string" || node.prompt.length > 4000)
     )
       throw new Error("节点提示词过长");
+    if (
+      node.originalPrompt !== undefined &&
+      (typeof node.originalPrompt !== "string" ||
+        node.originalPrompt.length > 4000)
+    )
+      throw new Error("原始提示词格式不正确");
+    if (node.kind === "video-prompt") {
+      validateVideoPromptNode(node);
+      if (node.referenceUrl && !safeImageUrl(node.referenceUrl))
+        throw new Error("提示词参考图地址无效");
+    }
+    if (node.kind === "video-generator")
+      validateInlineVideoCache(node.inlineVideo);
     ids.add(node.id);
   }
   if (
@@ -1028,6 +1044,11 @@ async function proxyImage(req, res, download) {
 app.get("/api/images/view", (req, res) => proxyImage(req, res, false));
 app.get("/api/images/download", (req, res) => proxyImage(req, res, true));
 
+const promptAI = createVideoPromptAI({
+  app,
+  dataDir: DATA_DIR,
+  captureImageEngine: apiImages.captureTextEngine,
+});
 const videos = createVideos({
   app,
   storage,
@@ -1037,6 +1058,8 @@ const videos = createVideos({
   validSourceImage,
   isBusy: () => setupService.isBusy(),
   getComfyUrl: () => COMFYUI_BASE_URL,
+  workflowPreset: process.env.VIDEO_WORKFLOW || config.videoWorkflow || "base",
+  promptAI,
 });
 
 app.use((req, res, next) => {
