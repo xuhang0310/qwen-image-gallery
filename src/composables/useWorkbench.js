@@ -1,4 +1,4 @@
-import { reactive, computed, watch, onBeforeUnmount } from "vue";
+import { reactive, computed, watch, onBeforeUnmount, toRaw } from "vue";
 import defaults from "../../shared/config.json";
 import { imageFileError } from "../image-upload";
 import {
@@ -29,6 +29,7 @@ const JOB_KEY = "qwen-image-gallery-jobs-v1";
 const BOARD_KEY = "qwen-image-gallery-board-v1";
 const BACKUP_KEY = "qwen-image-gallery-project-v2";
 const NAV_KEY = "qwen-image-gallery-navigation-v1";
+const SAVE_DELAY = 800;
 const read = (key, fallback) => {
   try {
     return JSON.parse(localStorage.getItem(key)) || fallback;
@@ -186,20 +187,26 @@ export function useWorkbench() {
     clearedBoard,
     uploadToken = 0,
     dirty = false,
+    interacting = false,
     savingCount = 0,
     blockedSave = false,
     healthTimer;
   let submissionOrder = 0;
-  const snapshot = () =>
-    JSON.parse(
-      JSON.stringify({
-        projectId: s.currentProject.id,
-        jobs: s.jobs,
-        videoJobs: s.videoJobs,
-        board: s.board,
-        hiddenJobIds: s.hiddenJobIds,
-      }),
-    );
+  const snapshot = () => {
+    const data = {
+      projectId: s.currentProject.id,
+      jobs: toRaw(s.jobs),
+      videoJobs: toRaw(s.videoJobs),
+      board: toRaw(s.board),
+      hiddenJobIds: toRaw(s.hiddenJobIds),
+    };
+    try {
+      return structuredClone(data);
+    } catch {
+      // Values structuredClone rejects are dropped by JSON, as before.
+      return JSON.parse(JSON.stringify(data));
+    }
+  };
   // Only a submission from the main form locks that form briefly.
   const busy = () => s.submitting || s.switching || s.projectBusy;
   function toast(message) {
@@ -217,8 +224,6 @@ export function useWorkbench() {
           savedAt: Date.now(),
         }),
       );
-      localStorage.setItem(JOB_KEY, JSON.stringify(s.jobs));
-      localStorage.setItem(BOARD_KEY, JSON.stringify(s.board));
     } catch {
       s.saveError = "浏览器备份空间不足，项目仍会保存到本地服务";
     }
@@ -242,6 +247,7 @@ export function useWorkbench() {
           jsonOptions({ ...data, revision: s.revision }, "PUT"),
         );
         s.revision = result.revision;
+        forgetLegacyBackup();
         updateProjectSummary();
         s.saved = dirty || savingCount > 1 ? "saving" : "saved";
         s.saveError = "";
@@ -260,15 +266,34 @@ export function useWorkbench() {
     });
     return saveChain;
   }
+  // Legacy keys are only read to migrate the default project; the server copy supersedes them.
+  function forgetLegacyBackup() {
+    try {
+      localStorage.removeItem(JOB_KEY);
+      localStorage.removeItem(BOARD_KEY);
+    } catch {
+      /* Browser storage is optional. */
+    }
+  }
   function changed() {
     if (!s.ready) return;
     dirty = true;
     s.saved = "saving";
     clearTimeout(saveTimer);
+    // A drag or pan saves once when the pointer is released.
+    if (interacting) return;
     saveTimer = setTimeout(() => {
       backup();
       flush();
-    }, 300);
+    }, SAVE_DELAY);
+  }
+  function beginInteraction() {
+    interacting = true;
+  }
+  function endInteraction() {
+    if (!interacting) return;
+    interacting = false;
+    if (dirty) changed();
   }
   function rememberNavigation() {
     try {
@@ -1193,6 +1218,7 @@ export function useWorkbench() {
     }
   }
   function unload() {
+    interacting = false;
     backup();
   }
   document.addEventListener("visibilitychange", flush);
@@ -1215,6 +1241,8 @@ export function useWorkbench() {
     busy,
     toast,
     flush,
+    beginInteraction,
+    endInteraction,
     upload,
     uploadSource,
     removeSource,
