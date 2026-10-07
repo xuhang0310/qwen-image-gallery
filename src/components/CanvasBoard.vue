@@ -378,6 +378,7 @@ function move(event) {
   const dx = event.clientX - drag.startX,
     dy = event.clientY - drag.startY;
   if (Math.hypot(dx, dy) < 4 && !drag.moved) return;
+  if (!drag.moved && drag.type !== "edge") props.store.beginInteraction();
   drag.moved = true;
   if (drag.type === "pan") board.value.pan = { x: drag.x + dx, y: drag.y + dy };
   else if (drag.type === "node") {
@@ -394,11 +395,15 @@ function move(event) {
       );
   }
 }
+function cancelDrag() {
+  drag = null;
+  temporaryPath.value = "";
+  props.store.endInteraction();
+}
 function up(event) {
   if (!drag) return;
   const d = drag;
-  drag = null;
-  temporaryPath.value = "";
+  cancelDrag();
   if (d.type === "edge" && d.moved) {
     const target = document
       .elementFromPoint(event.clientX, event.clientY)
@@ -1136,6 +1141,7 @@ watch(
   },
 );
 onBeforeUnmount(() => {
+  if (drag) cancelDrag();
   document.removeEventListener("keydown", key);
   resizeObserver?.disconnect();
   document.body.classList.remove("board-open");
@@ -1232,10 +1238,7 @@ onBeforeUnmount(() => {
       @pointerdown="down"
       @pointermove="move"
       @pointerup="up"
-      @pointercancel="
-        drag = null;
-        temporaryPath = '';
-      "
+      @pointercancel="cancelDrag"
       @wheel="wheel"
       @contextmenu="context"
       @dragenter="fileDrop.enter"

@@ -116,21 +116,61 @@ function validSourceImage(image) {
 }
 
 const workbenchSettings = createWorkbenchSettings({ app, dataDir: DATA_DIR });
+function archiveKey(image) {
+  return JSON.stringify([
+    image.type || "output",
+    image.subfolder || "",
+    image.filename,
+  ]);
+}
+// Archived copies are named <job id>-<n>.<ext> by workbenchSettings.archive.
+function rememberArchive(job) {
+  const prefix = String(job.id).replace(/[^a-zA-Z0-9_-]/g, "_");
+  (job.savedImages || []).forEach((saved, index) => {
+    const image = job.images?.[index];
+    if (
+      image?.filename &&
+      typeof saved?.path === "string" &&
+      path.isAbsolute(saved.path) &&
+      new RegExp(`^${prefix}-${index + 1}\\.(png|jpe?g|webp)$`, "i").test(
+        path.basename(saved.path),
+      )
+    )
+      storage.putArchive(archiveKey(image), saved.path);
+  });
+}
+for (const job of storage.list())
+  if (job.provider !== "api" && job.mediaType !== "video") rememberArchive(job);
+async function archivedImage(image) {
+  const file = storage.archivePath(archiveKey(image));
+  if (!file) return null;
+  try {
+    await fs.promises.access(file, fs.constants.R_OK);
+    return file;
+  } catch {
+    return null;
+  }
+}
 async function archiveLocalImages(job) {
-  return workbenchSettings.archive(job, job.images || [], (image) =>
-    withComfy("/view?" + imageQuery(image), {}, async (response) => {
-      if (!response.ok) throw new Error("读取生成图片失败");
-      const chunks = [];
-      let bytes = 0;
-      for await (const chunk of response.body) {
-        bytes += chunk.length;
-        if (bytes > 64 * 1024 * 1024)
-          throw new Error("生成图片超过保存大小限制");
-        chunks.push(chunk);
-      }
-      return Buffer.concat(chunks);
-    }),
+  const archived = await workbenchSettings.archive(
+    job,
+    job.images || [],
+    (image) =>
+      withComfy("/view?" + imageQuery(image), {}, async (response) => {
+        if (!response.ok) throw new Error("读取生成图片失败");
+        const chunks = [];
+        let bytes = 0;
+        for await (const chunk of response.body) {
+          bytes += chunk.length;
+          if (bytes > 64 * 1024 * 1024)
+            throw new Error("生成图片超过保存大小限制");
+          chunks.push(chunk);
+        }
+        return Buffer.concat(chunks);
+      }),
   );
+  rememberArchive({ ...job, ...archived });
+  return archived;
 }
 
 const apiImages = createApiImages({
@@ -274,7 +314,11 @@ function errorText(body) {
 
 async function withComfy(endpoint, options, consume) {
   const controller = new AbortController();
-  const { timeout = REQUEST_TIMEOUT, ...fetchOptions } = options || {};
+  const {
+    timeout = REQUEST_TIMEOUT,
+    streamBody = false,
+    ...fetchOptions
+  } = options || {};
   const timer = setTimeout(() => controller.abort(), timeout);
   const signal = fetchOptions.signal
     ? AbortSignal.any([controller.signal, fetchOptions.signal])
@@ -285,6 +329,8 @@ async function withComfy(endpoint, options, consume) {
       signal,
       headers: { Accept: "application/json", ...fetchOptions.headers },
     });
+    // Large downloads to a slow client must not hit the request timeout mid-stream.
+    if (streamBody) clearTimeout(timer);
     return await consume(response, signal);
   } finally {
     clearTimeout(timer);
@@ -1080,6 +1126,8 @@ async function proxyImage(req, res, download) {
   )
     return res.status(400).json({ error: "图片参数无效" });
   const params = new URLSearchParams({ filename, subfolder, type });
+  // A copy archived to the image folder outlives ComfyUI's output directory.
+  const archived = await archivedImage({ filename, subfolder, type });
   try {
     if (!download && req.query.thumbnail === "1") {
       const key = crypto
@@ -1091,28 +1139,9 @@ async function proxyImage(req, res, download) {
         if (!thumbnailTasks.has(key))
           thumbnailTasks.set(
             key,
-            withComfy("/view?" + params, {}, async (response, signal) => {
-              if (!response.ok) throw new Error("图片不存在");
-              const temp = target + ".tmp";
-              try {
-                await pipeline(
-                  Readable.fromWeb(response.body),
-                  sharp({ limitInputPixels: 64000000 })
-                    .resize({
-                      width: 440,
-                      height: 440,
-                      fit: "inside",
-                      withoutEnlargement: true,
-                    })
-                    .webp({ quality: 80 }),
-                  fs.createWriteStream(temp),
-                  { signal },
-                );
-                fs.renameSync(temp, target);
-              } finally {
-                if (fs.existsSync(temp)) fs.unlinkSync(temp);
-              }
-            }).finally(() => thumbnailTasks.delete(key)),
+            createThumbnail(target, archived, params).finally(() =>
+              thumbnailTasks.delete(key),
+            ),
           );
         await thumbnailTasks.get(key);
       }
@@ -1120,26 +1149,71 @@ async function proxyImage(req, res, download) {
       // The private cache lives in .data; Express otherwise hides dot directories.
       return res.sendFile(target, { dotfiles: "allow" });
     }
-    await withComfy("/view?" + params, {}, async (response, signal) => {
-      if (!response.ok) {
-        await response.body?.cancel();
-        return res.status(response.status).send("图片不存在");
-      }
+    res.set("Cache-Control", "private, max-age=86400");
+    if (download)
       res.set(
-        "Content-Type",
-        response.headers.get("content-type") || "image/png",
+        "Content-Disposition",
+        "attachment; filename*=UTF-8''" + encodeURIComponent(filename),
       );
-      res.set("Cache-Control", "private, max-age=86400");
-      if (download)
+    if (archived)
+      return res.sendFile(archived, { dotfiles: "allow" }, (error) => {
+        if (error && !res.headersSent)
+          res.status(404).json({ error: "图片不存在" });
+      });
+    const closed = new AbortController();
+    res.once("close", () => closed.abort());
+    await withComfy(
+      "/view?" + params,
+      { streamBody: true, signal: closed.signal },
+      async (response, signal) => {
+        if (!response.ok) {
+          await response.body?.cancel();
+          res.removeHeader("Content-Disposition");
+          return res.status(response.status).send("图片不存在");
+        }
         res.set(
-          "Content-Disposition",
-          "attachment; filename*=UTF-8''" + encodeURIComponent(filename),
+          "Content-Type",
+          response.headers.get("content-type") || "image/png",
         );
-      await pipeline(Readable.fromWeb(response.body), res, { signal });
-    });
+        await pipeline(Readable.fromWeb(response.body), res, { signal });
+      },
+    );
   } catch (error) {
     if (res.headersSent || res.destroyed) return res.destroy();
+    res.removeHeader("Content-Disposition");
     res.status(502).json({ error: error.message });
+  }
+}
+
+async function createThumbnail(target, archived, params) {
+  const temp = target + ".tmp";
+  const resize = (input) =>
+    input
+      .resize({
+        width: 440,
+        height: 440,
+        fit: "inside",
+        withoutEnlargement: true,
+      })
+      .webp({ quality: 80 });
+  try {
+    if (archived)
+      await resize(sharp(archived, { limitInputPixels: 64000000 })).toFile(
+        temp,
+      );
+    else
+      await withComfy("/view?" + params, {}, async (response, signal) => {
+        if (!response.ok) throw new Error("图片不存在");
+        await pipeline(
+          Readable.fromWeb(response.body),
+          resize(sharp({ limitInputPixels: 64000000 })),
+          fs.createWriteStream(temp),
+          { signal },
+        );
+      });
+    fs.renameSync(temp, target);
+  } finally {
+    if (fs.existsSync(temp)) fs.unlinkSync(temp);
   }
 }
 
